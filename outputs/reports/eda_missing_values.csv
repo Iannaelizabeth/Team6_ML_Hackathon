@@ -1,0 +1,9 @@
+file_type,column,missing_values
+arcs,from_node_id,0
+arcs,to_node_id,0
+nodes,latitude,0
+nodes,longitude,0
+route,arc_id,0
+track,latitude,0
+track,longitude,0
+track,timestamp,0
