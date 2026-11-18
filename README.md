@@ -1,347 +1,267 @@
 # PathSnap – Distributed Map-Matching and Route Reconstruction Using Machine Learning
 
-PathSnap is a machine-learning-based map-matching and route-reconstruction project that identifies the most likely road segments corresponding to noisy GPS observations. It combines geographical data processing, candidate generation, feature engineering, machine-learning classification and sequence-based route reconstruction to produce realistic vehicle trajectories.
+Team 6 · Machine Learning Hackathon
 
-## Project Overview
+PathSnap takes noisy GPS points from a vehicle and works out which roads the vehicle actually drove on. This is called map matching. For each GPS point it finds nearby road segments (candidates) and uses a classifier to score how likely each one is. A Hidden Markov Model (HMM) then picks the most plausible connected route through those candidates.
 
-GPS devices provide location observations that may contain errors due to signal interference, urban buildings, multipath effects and irregular sampling intervals. These errors can cause GPS points to appear away from the actual road travelled by a vehicle.
+## How it works
 
-PathSnap addresses this problem by matching GPS observations with possible road segments from a road network and identifying the most likely sequence of road segments.
+```text
+raw trip files → preprocessing → candidate generation (50 m) → feature engineering
+→ candidate labelling → classifier training → HMM/Viterbi decoding → maps + API
+```
 
-### Objectives
+1. **Preprocessing** (`src/preprocessing.py`): reads the `.track`, `.nodes`, `.arcs` and `.route` files, checks coordinates and timestamps, and writes clean tracks. Road geometry is projected into metres before any distance is calculated.
+2. **Candidate generation** (`src/candidate_generation.py`): uses a KD-tree (a spatial index for fast nearest-neighbour lookup) to find road segments within 30, 50 or 75 m of each GPS point, keeping at most 10. **50 m is the radius used downstream.**
+3. **Feature engineering** (`src/feature_engineering.py`): builds 11 features per (GPS point, candidate) pair:
+   - 3 spatial: perpendicular distance, projection ratio, road length
+   - 8 motion/context: GPS heading, road heading, heading difference, GPS speed, time difference, distance to previous and next point, connectivity score
+4. **Labelling** (`src/labeling.py`): matches each GPS point to the reference route and marks the correct candidate as 1 and the others as 0. Ambiguous points and points that can't be aligned are left out of training.
+5. **Classifiers** (models 1–5 below): score each candidate with the probability that it is the right road.
+6. **HMM + Viterbi** (`src/hmm.py`, `src/viterbi.py`, `src/route_matching.py`):
+   - The hidden states are the candidate segments.
+   - The emission score is the classifier's probability.
+   - The transition score compares the driving distance along the road graph with the straight-line distance between consecutive GPS points.
+   - Viterbi, a dynamic-programming algorithm, finds the highest-scoring sequence of segments.
+7. **Visualisation and serving**: Folium maps (`src/maps*.py`) and a FastAPI backend with a browser UI (`src/api.py`, `static/evaluator.html`).
 
-- Preprocess and validate GPS trajectory and road-network data.
-- Generate candidate road segments for each GPS observation.
-- Extract geographical and movement-related features.
-- Train and compare multiple machine-learning classification models.
-- Optimize model hyperparameters using Bayesian Optimization.
-- Reconstruct continuous routes using Hidden Markov Models and the Viterbi algorithm.
-- Visualize GPS trajectories, road networks and predicted routes using Folium.
+## Models
 
-## System Workflow
+The task is binary classification: is this candidate the road the vehicle was on? All five models come from scikit-learn.
 
-1. **Data Preprocessing:** Clean GPS observations, validate coordinates and timestamps, and check road-network consistency.
-2. **Candidate Generation:** Identify nearby road segments for each GPS observation using spatial searching.
-3. **Feature Engineering:** Extract features such as perpendicular distance, projection ratio, heading difference, GPS speed and connectivity.
-4. **Candidate Labelling:** Assign binary labels to candidate road segments using reference-route alignment.
-5. **Model Training:** Train machine-learning models to classify candidate road segments.
-6. **Hyperparameter Optimization:** Use Optuna for Bayesian hyperparameter optimization.
-7. **Route Reconstruction:** Apply HMM and Viterbi-based sequence decoding to identify a consistent route.
-8. **Evaluation and Visualization:** Compare model performance and visualize reconstructed routes.
+| # | Model | File | Settings used | Features |
+|---|---|---|---|---|
+| 1 | Random Forest | `src/models.py`, trained by `src/train_models.py` | 80 trees, max_depth 24, balanced class weights | top 8 |
+| 2 | MLP (small neural network) | `src/models.py`, trained by `src/train_models.py` | hidden layers (64, 32), Adam, 20 iterations | top 8 |
+| 3 | HistGradientBoosting | `src/model_3.py` | 300 iterations; tuned with Optuna | all 11 |
+| 4 | K-Nearest Neighbours | `src/model_4.py` | 25 neighbours, distance weighting | all 11 |
+| 5 | Logistic Regression | `src/model_5.py` | L2 regularisation, C = 1.0 | all 11 |
 
-## Machine Learning Models
+The "top 8" features are chosen by Random Forest importance inside each training fold (`outputs/reports/feature_selection_r50.json`).
 
-The project considers five machine-learning models:
+**The API and the decoder comparison use the tuned Model 3** (`outputs/models/model_3_tuned.joblib`).
 
-| Model | Algorithm |
-|---|---|
-| Model 1 | Random Forest |
-| Model 2 | MLP Classifier |
-| Model 3 | XGBoost |
-| Model 4 | RBF Support Vector Machine |
-| Model 5 | Logistic Regression |
+### Evaluation
 
-The models are compared using suitable classification and route-level evaluation metrics.
+- **Cross-validation:** 3-fold `GroupKFold` grouped by trip, so points from one trip never appear in both training and validation.
+- **Candidate-level metrics:** accuracy, precision, recall, macro F1, log loss.
+- **Observation-level Top-1 accuracy:** is the highest-scoring candidate for each GPS point the correct one?
+- **Route-level metrics:**
+  - route precision, recall and F1, measured by length of matching road
+  - route continuity: the share of consecutive matched segments that actually connect
+  - candidate miss rate: GPS points whose correct road wasn't among the candidates
 
-### Evaluation Metrics
+### Results (10 student-testing trips)
 
-- Accuracy
-- Precision
-- Recall
-- Macro F1-score
-- Log Loss
-- Observation-level Top-1 Accuracy
-- Route continuity
-- Training and inference time
+| Model | CV Macro F1 | Top-1 | Macro F1 | Log loss | Inference |
+|---|---|---|---|---|---|
+| Random Forest | 0.8761 ± 0.0217 | 0.8479 | 0.8929 | 0.1593 | 0.68 s |
+| MLP | 0.8433 ± 0.0209 | 0.8454 | 0.8543 | 0.2102 | 0.21 s |
+| HistGradientBoosting | 0.8999 ± 0.0120 | 0.8467 | 0.8965 | 0.1423 | 0.82 s |
+| KNN | 0.8693 ± 0.0235 | 0.8208 | 0.8779 | 0.3551 | 21.19 s |
+| Logistic Regression | 0.8320 ± 0.0105 | 0.8249 | 0.8371 | 0.2202 | 0.02 s |
 
-## Bayesian Optimization
+| Decoder (tuned Model 3) | Pointwise accuracy | Route F1 | Route continuity |
+|---|---|---|---|
+| Classifier only | 0.8604 | 0.7461 | 0.9491 |
+| HMM, distance-only emission | 0.8739 | 0.9801 | 0.9996 |
+| HMM, Model 3 emission | 0.8932 | 0.9837 | 0.9995 |
 
-Optuna is used for hyperparameter optimization.
+The full analysis is in the technical report.
 
-The optimization process explores promising model configurations and compares their performance using a consistent validation strategy.
+## Bayesian optimisation
 
-The objective is to improve model performance while avoiding unnecessary hyperparameter experiments.
+`src/bayesian_optimization.py` tunes Model 3 with Optuna's TPE sampler (Tree-structured Parzen Estimator), a Bayesian method that picks each new trial based on how earlier trials scored.
 
-## Route Reconstruction
-
-PathSnap includes Hidden Markov Model (HMM) and Viterbi-based route reconstruction.
-
-- **Emission probabilities:** Represent how likely a GPS observation is for a candidate road segment.
-- **Transition probabilities:** Represent the likelihood of moving between consecutive candidate road segments.
-- **Viterbi algorithm:** Finds the most likely sequence of road segments.
-
-This sequence-based approach helps improve route consistency compared with selecting the best candidate independently for every GPS observation.
+- Settings: 30 trials, 3 trip-grouped folds, up to 300 GPS points per trip.
+- Objective: cross-validated Top-1 accuracy.
+- Parameters searched: `learning_rate`, `max_leaf_nodes`, `min_samples_leaf` and `l2_regularization`.
+- `src/compare_tuning.py` compares the tuned and untuned models on identical folds and checks how much the score moves across random seeds.
 
 ## Dataset
 
-The project uses GPS trajectory and road-network information.
-
-The dataset includes:
-
-| File type | Description |
+| File | Contents |
 |---|---|
-| `.track` | GPS longitude, latitude and timestamp observations |
+| `.track` | GPS longitude, latitude, timestamp |
 | `.nodes` | Road-network node coordinates |
-| `.arcs` | Connections between road-network nodes |
-| `.route` | Reference road-segment sequence |
+| `.arcs` | Directed road connections (from node → to node) |
+| `.route` | Reference sequence of road arc IDs |
 
-### Dataset Partitions
-
-| Partition | Number of Trips | Purpose |
+| Partition | Trips | Used for |
 |---|---:|---|
-| Training | 80 | Model training and cross-validation |
-| Student Testing | 10 | Development-stage evaluation |
-| Evaluator Testing | 10 | Final evaluation |
+| `train` | 80 | Training, cross-validation and tuning |
+| `student_test` | 10 | Development comparison |
+| `evaluator_test` | 10 | Final evaluation only; never used for training or tuning |
 
-Evaluator-testing data must remain separate from model training and hyperparameter optimization.
+The data lives in `Student folder/Student folder/<partition>/<trip_id>/`. **Evaluator-testing data is not in the repo.** It goes only on Laptop 1, in `Student folder/Student folder/evaluator_test/`.
 
-## Technology Stack
-
-| Technology | Purpose |
-|---|---|
-| Python | Main programming language |
-| NumPy | Numerical operations |
-| Pandas | Data processing |
-| SciPy | Spatial searching and numerical operations |
-| PyProj | Geographical coordinate projection |
-| Scikit-learn | Machine-learning algorithms and evaluation |
-| XGBoost | Gradient boosting |
-| Optuna | Bayesian optimization |
-| Matplotlib | Data visualization |
-| Seaborn | Statistical visualization |
-| Folium | Interactive geographical maps |
-| Jupyter Notebook | Exploratory data analysis and experimentation |
-| Git and GitHub | Version control and collaboration |
-
-## Project Structure
+## Project structure
 
 ```text
 Team6_ML_Hackathon/
-│
-├── docs/
-│   └── Project documentation
-│
-├── notebooks/
-│   └── Exploratory data analysis and experiments
-│
-├── outputs/
-│   ├── processed/
-│   ├── reports/
-│   ├── models/
-│   └── figures/
-│
-├── PathSnap_student_materials/
-│   └── Project guidelines and reference materials
-│
-├── Student folder/
-│   └── Student folder/
-│       └── GPS trajectory and road-network dataset
-│
 ├── src/
-│   ├── preprocessing.py
-│   ├── candidate_generation.py
-│   ├── feature_engineering.py
-│   ├── labeling.py
-│   ├── evaluation.py
-│   ├── models.py
-│   ├── model_3.py
-│   ├── model_4.py
-│   ├── model_5.py
-│   ├── model_runner.py
-│   ├── hmm.py
-│   ├── viterbi.py
-│   ├── maps.py
-│   ├── maps_advanced.py
-│   └── data_contract.py
-│
-├── check_route_gaps.py
+│   ├── preprocessing.py           data checks, clean tracks, trip discovery
+│   ├── candidate_generation.py    30/50/75 m candidate search
+│   ├── feature_engineering.py     11 features
+│   ├── labeling.py                candidate labels from the reference route
+│   ├── data_contract.py           data interface used by model 5 and the HMM
+│   ├── evaluation.py              grouped CV, metrics, final RF/MLP fits
+│   ├── models.py                  RF and MLP definitions
+│   ├── train_models.py            trains/evaluates models 1–2
+│   ├── evaluate_student.py        scores RF/MLP on student_test
+│   ├── model_runner.py            shared training/evaluation for models 3–4
+│   ├── model_3.py                 HistGradientBoosting
+│   ├── model_4.py                 KNN
+│   ├── model_5.py                 Logistic Regression
+│   ├── bayesian_optimization.py   Optuna search for model 3
+│   ├── compare_tuning.py          tuned vs untuned model 3
+│   ├── hmm.py                     emissions, transitions, road-graph distances
+│   ├── viterbi.py                 Viterbi decoder
+│   ├── calibrate_hmm.py           fits HMM σ and β on training trips
+│   ├── route_matching.py          end-to-end match for one trip
+│   ├── route_evaluation.py        route precision/recall/F1/continuity
+│   ├── compare_decoders.py        classifier-only vs HMM decoders
+│   ├── maps.py                    GPS / road-network / candidate maps
+│   ├── maps_advanced.py           candidate maps + static PNGs
+│   ├── maps_prediction.py         predicted-route maps
+│   └── api.py                     FastAPI backend
+├── static/evaluator.html          evaluator UI (Leaflet bundled in static/vendor)
+├── tests/                         pytest suite
+├── notebooks/eda.ipynb            exploratory data analysis
+├── docs/                          data-processing notes, member 2 pipeline, report draft
+├── outputs/
+│   ├── reports/                   CSV/JSON summaries (EDA, candidates, labels, CV)
+│   ├── plots/                     EDA and model-comparison figures
+│   ├── models/                    saved models, results JSON, curves, HMM config
+│   └── maps/                      Folium HTML maps
+├── PathSnap_student_materials/    brief and guidelines
 ├── requirements.txt
-├── .gitignore
 └── README.md
 ```
 
-*Note: The structure above reflects the main project files and folders. Generated output subfolders may vary depending on the experiments executed.*
+These are not committed because they are too large for GitHub:
+- `outputs/processed/` (about 700 MB of candidate and feature files)
+- `random_forest_r50.joblib` (about 300 MB)
+- `mlp_r50.joblib`
 
-## Installation and Setup
+Regenerate them with the commands below.
 
-### 1. Clone the Repository
+## Setup
 
-```bash
+Tested with Python 3.13 on Windows.
+
+```powershell
 git clone https://github.com/Iannaelizabeth/Team6_ML_Hackathon.git
-```
-
-### 2. Navigate to the Project Directory
-
-```bash
 cd Team6_ML_Hackathon
-```
-
-### 3. Create a Virtual Environment
-
-```bash
 python -m venv venv
-```
-
-### 4. Activate the Virtual Environment
-
-**Windows PowerShell:**
-
-```powershell
 .\venv\Scripts\Activate.ps1
-```
-
-If PowerShell blocks activation, run:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-.\venv\Scripts\Activate.ps1
-```
-
-### 5. Install Dependencies
-
-```bash
 python -m pip install -r requirements.txt
+python -m pip install pytest      # only needed for the tests
 ```
 
-Install the additional machine-learning dependencies if they are not already included:
+If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` first.
 
-```bash
-python -m pip install xgboost
+## Reproducing the results
+
+Run from the repository root, in this order. All steps use the 50 m radius by default.
+
+```powershell
+# 1. Data checks and candidates
+python -m src.preprocessing
+python -m src.candidate_generation                       # writes 30, 50 and 75 m candidates
+
+# 2. Features and labels
+python -m src.feature_engineering --partition train --radius 50
+python -m src.feature_engineering --partition student_test --radius 50
+python -m src.labeling --partition train --radius 50
+python -m src.labeling --partition student_test --radius 50
+
+# 3. Models 1-2 (Random Forest, MLP)
+python -m src.train_models --skip-ablation
+python -m src.evaluate_student
+
+# 4. Models 3-5
+python -m src.model_3 --max-observations-per-trip 300
+python -m src.model_4                                     # KNN, 30 points per trip by default
+python -m src.model_5
+
+# 5. Bayesian optimisation of model 3, then the tuned model
+python -m src.bayesian_optimization --trials 30 --max-observations-per-trip 300
+python -m src.model_3 --max-observations-per-trip 300 --params-json outputs/models/model_3_bayes_r50_best_params.json --tag _tuned
+python -m src.compare_tuning
+
+# 6. HMM calibration and decoder comparison
+python -m src.calibrate_hmm
+python -m src.compare_decoders
 ```
 
-## Running the Project
+`src.model_3` processes only 30 points per trip unless you pass `--max-observations-per-trip 300`. The reported Model 3 results use 300.
 
-Open the repository in Visual Studio Code:
+### Maps
 
-```bash
-code .
-```
-
-The project contains separate modules for preprocessing, candidate generation, feature engineering, model training, evaluation, route reconstruction and visualization.
-
-Run the appropriate project pipeline or experiment entry point after configuring the dataset paths and required inputs.
-
-### Generating Folium maps
-
-```bash
-# GPS + road network + reference route + predicted routes (classifier-only and HMM)
-python -m src.maps_prediction --partition student_test --all
-# GPS + reference route + candidate segments, plus static trajectory/network PNGs
+```powershell
+python -m src.maps --partition train --trip 00000001 --map-type all
 python -m src.maps_advanced --partition train --trip-id 00000001
+python -m src.maps_prediction --partition student_test --all
 ```
 
-Maps are written to `outputs/maps/` (open the `.html` files in a browser).
+Maps are written to `outputs/maps/`. Open the `.html` files in a browser. Each prediction map has layers for the GPS track, the reference route (green), the classifier-only route (orange dashed) and the HMM route (red).
 
-### Running the tests
+### Tests
 
-```bash
+```powershell
 python -m pytest -q
 ```
 
-## Deployment (Two-Laptop Evaluation)
+## Deployment (two-laptop evaluation)
 
 | Laptop | Role |
 |---|---|
-| Laptop 1 | FastAPI backend: trained model, HMM/Viterbi decoder, road network and server-side evaluation |
-| Laptop 2 | Evaluator UI (`static/evaluator.html`): lists the 10 evaluation trips, sends the selected trip ID to the API and shows the returned route and metrics |
+| Laptop 1 | FastAPI backend: tuned Model 3, HMM/Viterbi decoder, road network, server-side metrics |
+| Laptop 2 | Evaluator UI: lists the 10 evaluation trips, sends the chosen trip ID to the API, shows the route and metrics |
 
 ### Laptop 1 – start the API
 
 ```powershell
-# Choose the partition to serve (default: student_test). For the final evaluation:
-$env:PATHSNAP_EVAL_PARTITION = "evaluator_test"
-# Optional: use a specific model artifact (default: outputs/models/model_3_tuned.joblib)
-# $env:PATHSNAP_MODEL_PATH = "outputs/models/model_3_tuned.joblib"
-
+$env:PATHSNAP_EVAL_PARTITION = "evaluator_test"   # default is student_test
+# Optional: $env:PATHSNAP_MODEL_PATH = "outputs/models/model_3_tuned.joblib"
 python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
 
-Find Laptop 1's IP address with `ipconfig`, and allow port 8000 through the Windows firewall if prompted. Every inference request is logged in this terminal (`request trip_id=...` and `match trip_id=... pointwise_accuracy=...`); show these logs to the evaluator.
+Find Laptop 1's IP with `ipconfig`, and allow port 8000 through Windows Firewall if prompted. Each request is logged in this terminal (`request trip_id=…` and `match trip_id=… pointwise_accuracy=…`). Show these logs to the evaluator.
 
-Endpoints:
-
-- `GET  /api/health` – model, decoder and partition status
-- `GET  /api/trips` – trip IDs in the served partition
-- `POST /api/trips/{trip_id}/match` – runs the full pipeline (candidates → classifier → HMM/Viterbi) and returns the predicted route and server-side metrics. Ground-truth routes are never included in the response.
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Model, decoder and partition status |
+| `GET /api/trips` | Trip IDs in the served partition |
+| `POST /api/trips/{trip_id}/match` | Runs candidates → classifier → HMM/Viterbi and returns the predicted route and metrics. The reference route is never sent back. |
 
 ### Laptop 2 – start the UI
 
-Copy the `static/` folder to Laptop 2 (or clone the repo), then serve it:
-
-```bash
+```powershell
 cd static
 python -m http.server 5500
 ```
 
-Open in the browser on Laptop 2:
+Then open `http://localhost:5500/evaluator.html?api=http://<LAPTOP1_IP>:8000`.
 
-```
-http://localhost:5500/evaluator.html?api=http://<LAPTOP1_IP>:8000
-```
+CORS (the browser rule that controls which sites may call the API) is open by default. To restrict it, set `PATHSNAP_CORS_ORIGINS` on Laptop 1, for example `http://<LAPTOP2_IP>:5500`.
 
-The API address is remembered for later visits. CORS is enabled on the API; to restrict it, set `PATHSNAP_CORS_ORIGINS` on Laptop 1 (for example `http://<LAPTOP2_IP>:5500`).
+To check everything on one machine, start the API and open `http://127.0.0.1:8000/`. The backend serves the UI too.
 
-For a single-machine check, open `http://127.0.0.1:8000/` after starting the API. The UI is also served directly by the backend.
+## Team
 
-## Candidate Generation Experiments
-
-Candidate generation is evaluated using three search radii:
-
-- 30 metres
-- 50 metres
-- 75 metres
-
-The maximum number of candidates per GPS observation is configured as 10.
-
-The experiments consider candidate coverage, candidate recall, average candidates per observation, zero-candidate observations and processing time.
-
-The final search radius should be selected using measured experimental results.
-
-## Team Contributions
-
-The project is developed collaboratively with responsibilities divided among team members.
-
-| Member | Assigned Responsibility |
+| SRN | Name |
 |---|---|
-| Member 1 | Data preprocessing, candidate generation, feature engineering and labelling |
-| Member 2 | Random Forest and MLP Classifier |
-| Member 3 | XGBoost, RBF SVM, Bayesian Optimization and model comparison |
-| Member 4 | Logistic Regression and route-reconstruction integration |
+| PES2UG24CS636 | Ianna Elizabeth Reni |
+| PES2UG24CS916 | Abhiram Kolalapudi |
+| PES2UG24CS659 | Shloka Shetty |
+| PES2UG24CS662 | Swapna |
 
-## Expected Project Outputs
 
-The project is designed to produce:
+## Data handling
 
-- Cleaned GPS trajectory data.
-- Candidate road-segment datasets.
-- Feature-engineered and labelled training data.
-- Trained machine-learning models.
-- Model evaluation reports.
-- Bayesian optimization results.
-- Route-reconstruction outputs.
-- Interactive geographical maps.
-- Model comparison graphs.
-
-Actual performance values and final experimental findings should be reported from the generated evaluation outputs.
-
-## Reproducibility and Data Handling
-
-- Keep raw and processed datasets separate.
-- Preserve trip and observation identifiers.
-- Use trip-based grouping during cross-validation to avoid data leakage.
-- Fit feature scaling within training folds.
-- Keep evaluator-testing data separate from training and optimization.
-- Record model configurations and experiment results.
-- Do not commit unnecessary large datasets, virtual environments or generated model files.
-
-## Repository
-
-GitHub: https://github.com/Iannaelizabeth/Team6_ML_Hackathon
-
-## Conclusion
-
-PathSnap combines machine learning and geographical sequence modelling to address noisy GPS map matching and route reconstruction.
-
-By generating candidate road segments, extracting movement-related features, comparing multiple classification algorithms and applying HMM/Viterbi-based sequence decoding, the project aims to reconstruct realistic vehicle trajectories from GPS observations.
-
-The project provides an integrated framework for studying geographical data processing, machine learning, model optimization and route reconstruction.
+- Cross-validation is grouped by trip to avoid leakage. Leakage here means points from one trip ending up in both training and validation, which would inflate the scores.
+- Scaling and imputation are fitted inside each training fold.
+- Evaluator-testing data is never used for training, tuning or feature selection, and is never committed.
+- Raw data files are read-only; the code writes everything to `outputs/`.
