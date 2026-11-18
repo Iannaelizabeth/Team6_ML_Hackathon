@@ -1,0 +1,2 @@
+trip_id,partition,gps_observations,missing_track_values,invalid_coordinates,invalid_timestamps,valid_observations,duplicate_gps_rows,chronological,one_second_intervals,irregular_intervals,non_positive_intervals,node_count,arc_count,route_length,invalid_node_coordinates,invalid_arc_endpoints,invalid_route_arc_ids,broken_route_connections
+00000001,train,1315,0,0,0,1315,0,True,1289,25,0,88809,165790,525,0,0,0,0
