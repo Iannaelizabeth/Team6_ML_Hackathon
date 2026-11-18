@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PathSnap Route Evaluator</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172033; background: #f3f6fb; }
+    body { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    header, section { background: white; border: 1px solid #dce3ed; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    h1 { margin: 0 0 6px; font-size: 1.5rem; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
+    select, button { border: 1px solid #aebbd0; border-radius: 7px; padding: 9px 12px; font: inherit; }
+    button { color: white; background: #2459a6; border-color: #2459a6; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { min-height: 1.5em; color: #45546b; }
+    #map { width: 100%; height: min(65vh, 620px); background: #eef3f8; border-radius: 8px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 16px; color: #45546b; font-size: .9rem; }
+    .key { display: inline-block; width: 18px; height: 4px; margin-right: 6px; vertical-align: middle; }
+    .key.point { width: 8px; height: 8px; border-radius: 50%; }
+    #metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .metric { padding: 12px; border-radius: 8px; background: #f3f6fb; }
+    .metric strong { display: block; font-size: 1.2rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PathSnap Route Evaluator</h1>
+    <div>Model 3 HistGradientBoosting with HMM/Viterbi route reconstruction</div>
+    <div class="controls">
+      <label for="trip">Student-test trip</label>
+      <select id="trip"><option value="">Loading trips…</option></select>
+      <button id="match" type="button">Reconstruct route</button>
+    </div>
+    <p id="status" role="status">Loading model status…</p>
+  </header>
+  <section>
+    <div class="legend">
+      <span><i class="key" style="background:#50718f"></i>GPS track</span>
+      <span><i class="key" style="background:#d2543d"></i>Reconstructed road route</span>
+      <span><i class="key point" style="background:#297a58"></i>Matched points</span>
+    </div>
+    <svg id="map" role="img" aria-label="GPS track and reconstructed road route"></svg>
+  </section>
+  <section>
+    <h2>Match summary</h2>
+    <div id="metrics">Choose a trip to begin.</div>
+  </section>
+  <script>
+    const tripSelect = document.getElementById("trip");
+    const matchButton = document.getElementById("match");
+    const statusText = document.getElementById("status");
+    const svg = document.getElementById("map");
+    const metrics = document.getElementById("metrics");
+    const NS = "http://www.w3.org/2000/svg";
+
+    function drawRoute(data) {
+      svg.replaceChildren();
+      const all = [...data.gps_points, ...data.route_coordinates, ...data.snapped_points];
+      if (!all.length) return;
+      const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const width = svg.clientWidth || 900, height = svg.clientHeight || 500, pad = 24;
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      const scale = Math.min((width - 2 * pad) / Math.max(maxX - minX, 1e-8),
+                             (height - 2 * pad) / Math.max(maxY - minY, 1e-8));
+      const project = p => [pad + (p[0] - minX) * scale,
+                            height - pad - (p[1] - minY) * scale];
+      const addLine = (points, color, strokeWidth) => {
+        if (points.length < 2) return;
+        const line = document.createElementNS(NS, "polyline");
+        line.setAttribute("points", points.map(project).map(p => p.join(",")).join(" "));
+        line.setAttribute("fill", "none");
+        line.setAttribute("stroke", color);
+        line.setAttribute("stroke-width", strokeWidth);
+        line.setAttribute("stroke-linejoin", "round");
+        line.setAttribute("stroke-linecap", "round");
+        svg.appendChild(line);
+      };
+      const markerStep = Math.max(1, Math.ceil(data.snapped_points.length / 500));
+      for (let i = 0; i < data.snapped_points.length; i += markerStep) {
+        const point = data.snapped_points[i];
+        const circle = document.createElementNS(NS, "circle");
+        const [cx, cy] = project(point);
+        circle.setAttribute("cx", cx); circle.setAttribute("cy", cy);
+        circle.setAttribute("r", "1.8"); circle.setAttribute("fill", "#297a58");
+        svg.appendChild(circle);
+      }
+      addLine(data.gps_points, "#50718f", 2);
+      addLine(data.route_coordinates, "#d2543d", 3);
+    }
+
+    function showMetrics(data) {
+      metrics.replaceChildren();
+      const values = [
+        ["Matched fixes", `${data.matched_points} / ${data.gps_points.length}`],
+        ["Unmatched fixes", data.unmatched_points],
+        ["Route arcs", data.route_arc_count],
+        ["Sequence breaks", data.sequence_breaks],
+        ["Unfilled gaps", data.unfilled_route_gaps],
+        ["Runtime", `${data.runtime_ms.toFixed(1)} ms`]
+      ];
+      for (const [label, value] of values) {
+        const card = document.createElement("div");
+        card.className = "metric";
+        const strong = document.createElement("strong");
+        strong.textContent = value;
+        const caption = document.createElement("span");
+        caption.textContent = label;
+        card.append(strong, caption);
+        metrics.appendChild(card);
+      }
+    }
+
+    async function initialize() {
+      try {
+        const [healthResponse, tripsResponse] = await Promise.all([
+          fetch("/api/health"), fetch("/api/trips")
+        ]);
+        if (!healthResponse.ok || !tripsResponse.ok) throw new Error("Backend is unavailable.");
+        const health = await healthResponse.json();
+        const tripData = await tripsResponse.json();
+        statusText.textContent = `Ready · ${health.model} · ${health.decoder} · ${health.model_artifact}`;
+        tripSelect.replaceChildren();
+        for (const id of tripData.trips) {
+          const option = document.createElement("option");
+          option.value = id; option.textContent = id;
+          tripSelect.appendChild(option);
+        }
+        if (!tripData.trips.length) statusText.textContent = "No student-test trips were found.";
+      } catch (error) {
+        statusText.textContent = error.message;
+      }
+    }
+
+    matchButton.addEventListener("click", async () => {
+      if (!tripSelect.value) return;
+      matchButton.disabled = true;
+      statusText.textContent = "Generating candidates and reconstructing route…";
+      try {
+        const response = await fetch(`/api/trips/${encodeURIComponent(tripSelect.value)}/match`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Route reconstruction failed.");
+        drawRoute(data);
+        showMetrics(data);
+        statusText.textContent = `Completed ${data.decoder} for ${data.trip_id}.`;
+      } catch (error) {
+        statusText.textContent = error.message;
+      } finally {
+        matchButton.disabled = false;
+      }
+    });
+
+    initialize();
+  </script>
+</body>
+</html>

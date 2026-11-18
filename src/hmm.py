@@ -46,8 +46,12 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
-from data_contract import FEATURE_COLUMNS, Trip, build_trip_frame, list_trips, load_trip
-from viterbi import viterbi
+if __package__:
+    from .data_contract import FEATURE_COLUMNS, Trip, build_trip_frame, list_trips, load_trip
+    from .viterbi import viterbi
+else:
+    from data_contract import FEATURE_COLUMNS, Trip, build_trip_frame, list_trips, load_trip
+    from viterbi import viterbi
 
 LOG_EPS = 1e-6
 DECODERS = ("hmm_classifier", "hmm_gaussian", "classifier_only")
@@ -159,7 +163,7 @@ def predict_candidate_proba(model_artifact: dict, cand: pd.DataFrame) -> np.ndar
     cols = model_artifact.get("feature_columns", FEATURE_COLUMNS)
     if cand.empty:
         return np.zeros(0)
-    return model_artifact["model"].predict_proba(cand[cols].to_numpy(dtype=float))[:, 1]
+    return model_artifact["model"].predict_proba(cand[cols])[:, 1]
 
 
 # ----------------------------------------------------------------------------

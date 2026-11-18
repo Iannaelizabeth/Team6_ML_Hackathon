@@ -1,0 +1,17 @@
+{
+  "best_value_top1": 0.8488857270576435,
+  "best_params": {
+    "learning_rate": 0.04323385181598876,
+    "max_iter": 80,
+    "max_leaf_nodes": 61,
+    "min_samples_leaf": 84,
+    "l2_regularization": 4.17362192407678e-05
+  },
+  "radius_m": 50,
+  "folds": 3,
+  "trials": 8,
+  "max_observations_per_trip": 30,
+  "training_rows": 16737,
+  "training_trips": 80,
+  "seed": 42
+}

@@ -5,3 +5,9 @@ pyproj
 matplotlib
 folium
 jupyter
+scikit-learn
+joblib
+optuna
+fastapi
+uvicorn
+httpx
