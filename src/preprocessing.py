@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import json
 import pandas as pd
 import numpy as np
 
@@ -18,9 +19,11 @@ DATA_ROOT = (
 
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "reports"
 PROCESSED_DIR = PROJECT_ROOT / "outputs" / "processed"
+MAP_DIR = PROJECT_ROOT / "outputs" / "maps"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+MAP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -132,25 +135,25 @@ def preprocess_track(track):
     )
 
     # Check finite timestamps.
-    valid_timestamps = np.isfinite(
-        track["timestamp"]
-    )
+    valid_timestamps = np.isfinite(track["timestamp"])
 
     report["invalid_timestamps"] = int(
         (~valid_timestamps).sum()
     )
 
     # Keep only valid GPS observations.
-    valid_rows = (
-        valid_coordinates
-        & valid_timestamps
-        & track.notna().all(axis=1)
-    )
+    valid_rows = valid_coordinates & valid_timestamps & track.notna().all(axis=1)
 
     clean_track = track.loc[valid_rows].copy()
 
     # Preserve the original GPS row number.
     clean_track["observation_id"] = clean_track.index
+
+    invalid = track.loc[~valid_rows].copy()
+    invalid["observation_id"] = invalid.index
+    invalid["invalid_coordinate"] = ~valid_coordinates.loc[invalid.index]
+    invalid["invalid_timestamp"] = ~valid_timestamps.loc[invalid.index]
+    invalid["missing_value"] = track.loc[invalid.index].isna().any(axis=1)
 
     report["valid_observations"] = len(clean_track)
     report["removed_observations"] = (
@@ -169,8 +172,11 @@ def preprocess_track(track):
     )
 
     # Timestamp ordering.
-    report["chronological"] = bool(
-        clean_track["timestamp"].is_monotonic_increasing
+    report["chronological"] = bool(clean_track["timestamp"].is_monotonic_increasing)
+    report["duplicate_timestamps"] = int(clean_track["timestamp"].duplicated().sum())
+    report["timestamp_span_seconds"] = (
+        float(clean_track["timestamp"].max() - clean_track["timestamp"].min())
+        if len(clean_track) else 0.0
     )
 
     # Timestamp intervals.
@@ -203,6 +209,7 @@ def preprocess_track(track):
         else None
     )
 
+    clean_track.attrs["invalid_observations"] = invalid
     return clean_track, report
 
 
@@ -223,6 +230,9 @@ def validate_network(nodes, arcs, route):
     report["node_count"] = len(nodes)
     report["arc_count"] = len(arcs)
     report["route_length"] = len(route)
+    report["missing_node_values"] = int(nodes.isna().sum().sum())
+    report["missing_arc_values"] = int(arcs.isna().sum().sum())
+    report["missing_route_values"] = int(route.isna().sum().sum())
 
     # --------------------------------------------------------
     # Node validation
@@ -371,6 +381,82 @@ def process_trip(partition, trip_id):
     }
 
     return clean_track, report
+
+
+def discover_trips(partition):
+    """Return sorted trip directory names, excluding non-directory entries."""
+    partition_dir = DATA_ROOT / partition
+    if not partition_dir.exists():
+        raise FileNotFoundError(f"Partition not found: {partition_dir}")
+    return sorted(path.name for path in partition_dir.iterdir() if path.is_dir())
+
+
+def audit_partition(partition, write_outputs=True):
+    """Run raw data-quality checks and emit clean/invalid observation artifacts.
+
+    Raw `.track`, `.nodes`, `.arcs`, and `.route` files are read only. Invalid
+    GPS rows are recorded separately with source observation IDs and reason flags.
+    """
+    inventory = []
+    invalid_rows = []
+    consistency = []
+    for trip_id in discover_trips(partition):
+        try:
+            data = load_trip(partition, trip_id)
+            clean, gps_report = preprocess_track(data["track"])
+            network_report = validate_network(data["nodes"], data["arcs"], data["route"])
+            row = {"trip_id": trip_id, "partition": partition, **gps_report, **network_report}
+            inventory.append(row)
+            bad = clean.attrs.get("invalid_observations")
+            if bad is not None and not bad.empty:
+                bad.insert(0, "partition", partition)
+                bad.insert(0, "trip_id", trip_id)
+                invalid_rows.append(bad)
+            consistency.append({
+                "trip_id": trip_id, "partition": partition,
+                "track_rows": len(data["track"]), "node_count": len(data["nodes"]),
+                "arc_count": len(data["arcs"]), "route_length": len(data["route"]),
+                "route_arcs_exceed_network": bool(len(data["route"]) > len(data["arcs"])),
+                "nodes_per_arc": float(len(data["nodes"]) / len(data["arcs"])) if len(data["arcs"]) else np.nan,
+                "route_arcs_per_gps_point": float(len(data["route"]) / len(data["track"])) if len(data["track"]) else np.nan,
+            })
+            if write_outputs:
+                clean.to_csv(PROCESSED_DIR / f"{partition}_{trip_id}_track.csv", index=False)
+        except Exception as exc:
+            inventory.append({"trip_id": trip_id, "partition": partition, "error": str(exc)})
+    inventory_df = pd.DataFrame(inventory)
+    consistency_df = pd.DataFrame(consistency)
+    invalid_df = pd.concat(invalid_rows, ignore_index=True) if invalid_rows else pd.DataFrame(
+        columns=["trip_id", "partition", "observation_id", "longitude", "latitude", "timestamp", "invalid_coordinate", "invalid_timestamp", "missing_value"]
+    )
+    if write_outputs:
+        REPORT_DIR_LOCAL = PROJECT_ROOT / "outputs" / "reports"
+        REPORT_DIR_LOCAL.mkdir(parents=True, exist_ok=True)
+        inventory_df.to_csv(REPORT_DIR_LOCAL / f"{partition}_inventory.csv", index=False)
+        consistency_df.to_csv(REPORT_DIR_LOCAL / f"{partition}_consistency.csv", index=False)
+        invalid_df.to_csv(REPORT_DIR_LOCAL / f"{partition}_invalid_gps.csv", index=False)
+        _write_quality_summary(inventory_df, consistency_df, partition)
+    return inventory_df, consistency_df, invalid_df
+
+
+def _write_quality_summary(inventory_df, consistency_df, partition):
+    """Persist concise aggregate missing-value and data-quality findings."""
+    successful = inventory_df.loc[inventory_df.get("error", pd.Series(index=inventory_df.index, dtype=object)).isna()]
+    metrics = ["gps_observations", "valid_observations", "missing_track_values", "missing_node_values",
+               "missing_arc_values", "missing_route_values", "invalid_coordinates",
+               "invalid_timestamps", "duplicate_gps_rows", "irregular_intervals", "invalid_node_coordinates",
+               "invalid_arc_endpoints", "invalid_route_arc_ids", "broken_route_connections"]
+    summary = {"partition": partition, "trip_count": len(inventory_df), "successful_trips": len(successful)}
+    for metric in metrics:
+        if metric in successful:
+            vals = pd.to_numeric(successful[metric], errors="coerce")
+            summary[f"{metric}_total"] = int(vals.sum())
+            summary[f"{metric}_mean_per_trip"] = float(vals.mean()) if vals.notna().any() else np.nan
+    summary["trips_with_broken_route_connections"] = int((pd.to_numeric(successful.get("broken_route_connections", 0), errors="coerce") > 0).sum())
+    summary["trips_with_non_chronological_gps"] = int((~successful.get("chronological", pd.Series(dtype=bool)).fillna(False)).sum())
+    summary["median_nodes_per_arc"] = float(consistency_df["nodes_per_arc"].median()) if not consistency_df.empty else np.nan
+    path = PROJECT_ROOT / "outputs" / "reports" / f"{partition}_data_quality_summary.json"
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 # ============================================================
@@ -532,21 +618,12 @@ if __name__ == "__main__":
     print("\nPATHSNAP DATA PREPROCESSING")
     print("=" * 55)
 
-    # Process training data.
-    train_report = process_partition("train")
-
-    print_summary(
-        train_report,
-        "train"
-    )
-
-    # Process student testing data.
-    test_report = process_partition("student_test")
-
-    print_summary(
-        test_report,
-        "student_test"
-    )
+    # Full audit emits clean tracks, invalid-row reason records, inventories,
+    # consistency tables and aggregate quality summaries per partition.
+    train_report, _, _ = audit_partition("train")
+    print_summary(train_report, "train")
+    test_report, _, _ = audit_partition("student_test")
+    print_summary(test_report, "student_test")
 
     print("\n" + "=" * 55)
     print("PREPROCESSING COMPLETED")

@@ -1,0 +1,1 @@
+trip_id,partition,observation_id,longitude,latitude,timestamp,invalid_coordinate,invalid_timestamp,missing_value

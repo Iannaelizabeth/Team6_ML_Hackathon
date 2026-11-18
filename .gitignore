@@ -8,6 +8,12 @@ __pycache__/
 
 # Generated candidate datasets
 outputs/processed/
+outputs/maps/
+outputs/figures/
+
+# Candidate datasets and generated audit exports
+data/candidates/
+data/reports/
 
 # Notebook checkpoints
 .ipynb_checkpoints/

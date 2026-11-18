@@ -1,0 +1,7 @@
+file,partition,radius_m,rows,schema_matches_first_file,duplicate_candidate_keys_within_chunks,missing_values_total,missing_by_column
+student_test_candidates_r30.csv,student_test,30,98537,True,0,0,
+student_test_candidates_r50.csv,student_test,50,131528,True,0,0,
+student_test_candidates_r75.csv,student_test,75,149935,True,0,0,
+train_candidates_r30.csv,train,30,939332,True,0,0,
+train_candidates_r50.csv,train,50,1228186,True,0,0,
+train_candidates_r75.csv,train,75,1452129,True,0,0,
