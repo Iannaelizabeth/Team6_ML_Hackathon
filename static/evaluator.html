@@ -133,10 +133,8 @@
     const street = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
-    const light = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-      maxZoom: 19, attribution: "&copy; OpenStreetMap &copy; CARTO"
-    });
-    map._baseLayers = { "Street map": street, "Light map": light };
+    // OpenStreetMap only: CARTO basemaps now need an API key and show a watermark.
+    map._baseLayers = { "Street map": street };
 
     const legend = L.control({ position: "bottomleft" });
     legend.onAdd = () => {

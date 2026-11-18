@@ -29,6 +29,22 @@ MAP_DIR = PROJECT_ROOT / "outputs" / "maps"
 MODEL_DIR = PROJECT_ROOT / "outputs" / "models"
 
 
+ESRI_STREET = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+ESRI_ATTR = ("Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, Intermap, INCREMENT P, "
+             "NRCan, Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, "
+             "&copy; OpenStreetMap contributors, and the GIS User Community")
+
+
+def add_basemaps(m: folium.Map) -> None:
+    """Same backgrounds as src/maps.py: OpenStreetMap style (openstreetmap.de) by default.
+
+    tile.openstreetmap.org refuses pages opened from disk (file://), and CARTO basemaps
+    now need an API key, so neither is used.
+    """
+    from src.maps import add_basemaps as _shared
+    _shared(m)
+
+
 def _load_artifact(model_path: Path | None = None) -> dict:
     if model_path is None:
         tuned, baseline = MODEL_DIR / "model_3_tuned.joblib", MODEL_DIR / "model_3.joblib"
@@ -64,24 +80,16 @@ def create_prediction_map(partition: str, trip_id: str, artifact: dict | None = 
     track = trip.track
     points = track[["lat", "lon"]].to_numpy(dtype=float).tolist()
     m = folium.Map(location=[float(track.lat.median()), float(track.lon.median())],
-                   zoom_start=15, control_scale=True, tiles="OpenStreetMap")
-    folium.TileLayer("CartoDB positron", name="Light basemap").add_to(m)
+                   zoom_start=15, control_scale=True, tiles=None)
+    add_basemaps(m)
 
     network = FeatureGroup(name="Road network", show=True)
     segments = [[[lat1, lon1], [lat2, lon2]] for (lon1, lat1), (lon2, lat2) in _road_network_segments(trip)]
     if segments:  # one multi-polyline keeps the HTML small
-        PolyLine(segments, color="#8c8c8c", weight=1, opacity=0.45).add_to(network)
+        PolyLine(segments, color="#7b8794", weight=1.5, opacity=0.6).add_to(network)
     network.add_to(m)
 
-    gps = FeatureGroup(name="GPS observations", show=True)
-    PolyLine(points, color="#1f77b4", weight=2, opacity=0.7, tooltip="Raw GPS trajectory").add_to(gps)
-    stride = max(1, len(points) // 300)
-    for i in range(0, len(points), stride):
-        CircleMarker(points[i], radius=2, color="#1f77b4", fill=True, fill_opacity=0.8,
-                     tooltip=f"GPS obs {i}").add_to(gps)
-    gps.add_to(m)
-
-    legend = [("Road network", "#8c8c8c"), ("GPS observations", "#1f77b4")]
+    legend = [("Road network", "#7b8794")]
 
     # Reference route: loaded separately, only for display/comparison.
     route_df = load_trip(partition, trip_id).get("route")
@@ -90,7 +98,7 @@ def create_prediction_map(partition: str, trip_id: str, artifact: dict | None = 
     reference = [a for a in reference if 0 <= a < len(trip.arcs)]
     if reference:
         ref = FeatureGroup(name="Reference route", show=True)
-        PolyLine(_route_lines(trip, reference), color="#2ca02c", weight=7, opacity=0.55,
+        PolyLine(_route_lines(trip, reference), color="#2ca02c", weight=10, opacity=0.45,
                  tooltip="Reference route").add_to(ref)
         ref.add_to(m)
         legend.append(("Reference route", "#2ca02c"))
@@ -104,10 +112,29 @@ def create_prediction_map(partition: str, trip_id: str, artifact: dict | None = 
 
     hmm_group = FeatureGroup(name="Predicted: classifier + HMM/Viterbi", show=True)
     if hmm.route_arcs:
-        PolyLine(_route_lines(trip, hmm.route_arcs), color="#d62728", weight=3.5, opacity=0.95,
+        PolyLine(_route_lines(trip, hmm.route_arcs), color="#e4572e", weight=6, opacity=0.75,
                  tooltip="Classifier + HMM/Viterbi").add_to(hmm_group)
     hmm_group.add_to(m)
-    legend.append(("Predicted: classifier + HMM/Viterbi", "#d62728"))
+    legend.append(("Predicted: classifier + HMM/Viterbi", "#e4572e"))
+
+    # GPS drawn last so it stays visible on top of the routes it lies along.
+    gps = FeatureGroup(name="GPS observations", show=True)
+    PolyLine(points, color="#2563eb", weight=2, opacity=0.95, tooltip="Raw GPS trajectory").add_to(gps)
+    stride = max(1, len(points) // 300)
+    for i in range(0, len(points), stride):
+        # Invisible hover targets: the thin GPS line stays readable over the red route.
+        CircleMarker(points[i], radius=6, stroke=False, fill=True, fill_opacity=0,
+                     tooltip=f"GPS obs {i}").add_to(gps)
+    gps.add_to(m)
+    legend.append(("GPS observations", "#2563eb"))
+
+    ends = FeatureGroup(name="Start / end", show=True)
+    CircleMarker(points[0], radius=7, color="white", weight=2, fill=True, fill_color="#15803d",
+                 fill_opacity=1, tooltip="Start").add_to(ends)
+    CircleMarker(points[-1], radius=7, color="white", weight=2, fill=True, fill_color="#111827",
+                 fill_opacity=1, tooltip="End").add_to(ends)
+    ends.add_to(m)
+    legend.append(("Start (green dot) / end (black dot)", "#15803d"))
 
     m.fit_bounds([[float(track.lat.min()), float(track.lon.min())],
                   [float(track.lat.max()), float(track.lon.max())]])

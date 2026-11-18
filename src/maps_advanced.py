@@ -80,7 +80,11 @@ def create_trip_map(partition: str, trip_id: str, radius: int = 50, candidate_li
     lon_pad = max(0.002, float(clean.longitude.max() - clean.longitude.min()) * 0.08)
     bounds = (float(clean.longitude.min()) - lon_pad, float(clean.longitude.max()) + lon_pad,
               float(clean.latitude.min()) - lat_pad, float(clean.latitude.max()) + lat_pad)
-    m = folium.Map(location=center, zoom_start=14, control_scale=True, tiles="OpenStreetMap")
+    # Esri street tiles: OpenStreetMap blocks tiles on pages opened from disk (file://),
+    # and CARTO basemaps now need an API key.
+    m = folium.Map(location=center, zoom_start=14, control_scale=True, tiles=None)
+    from src.maps import add_basemaps
+    add_basemaps(m)
 
     gps_group = FeatureGroup(name="GPS observations", show=True)
     # Use a line for the trajectory plus sparse points for reasonable file size.

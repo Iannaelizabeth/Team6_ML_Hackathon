@@ -43,3 +43,7 @@ Desktop.ini
 # Evaluator-testing data (ground truth) must never be committed; keep it only on Laptop 1
 evaluator_test.zip
 evaluator_test/
+
+# Refit RF/MLP for the student-test table: RF is ~335 MB (over GitHub limit); recreate via evaluation.save_final_models
+outputs/models/random_forest_r50.joblib
+outputs/models/mlp_r50.joblib

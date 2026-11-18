@@ -1,0 +1,48 @@
+{
+  "note": "Final RF/MLP refit on 80 training trips with model_config_r50.json; scored on 10 student-test trips",
+  "features": [
+    "heading_difference",
+    "perpendicular_distance",
+    "projection_ratio",
+    "road_length",
+    "road_heading",
+    "distance_to_previous",
+    "distance_to_next",
+    "gps_speed"
+  ],
+  "total_fit_seconds_both": 327.2123170999985,
+  "random_forest": {
+    "model_path": "random_forest_r50.joblib",
+    "convergence_warnings": [],
+    "student_test": {
+      "inference_seconds": 0.8300687999872025,
+      "inference_seconds_per_row": 8.096494410830871e-06,
+      "candidate_rows_evaluated": 102522,
+      "accuracy": 0.9431048945592165,
+      "precision": 0.8023627267795793,
+      "recall": 0.8390268498676415,
+      "macro_f1": 0.8932439267334201,
+      "log_loss": 0.15590835882217366,
+      "observation_top1_accuracy": 0.8497415857809152,
+      "top1_observations": 15866
+    }
+  },
+  "mlp": {
+    "model_path": "mlp_r50.joblib",
+    "convergence_warnings": [
+      "Stochastic Optimizer: Maximum iterations (20) reached and the optimization hasn't converged yet."
+    ],
+    "student_test": {
+      "inference_seconds": 0.10109499999089167,
+      "inference_seconds_per_row": 9.860810361765441e-07,
+      "candidate_rows_evaluated": 102522,
+      "accuracy": 0.9138721445153235,
+      "precision": 0.6598073952939039,
+      "recall": 0.9154796420017648,
+      "macro_f1": 0.8570365406606621,
+      "log_loss": 0.20586927332968719,
+      "observation_top1_accuracy": 0.8407286020421026,
+      "top1_observations": 15866
+    }
+  }
+}
