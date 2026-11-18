@@ -9,11 +9,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Generated candidate datasets
+# Generated candidate/feature datasets (700+ MB, files exceed GitHub's 100 MB limit).
+# Regenerate with the candidate_generation / feature_engineering pipeline.
 outputs/processed/
-outputs/maps/
-outputs/figures/
-outputs/models/
+# outputs/models/ (model weights + configs) and outputs/maps/ (Folium maps) are
+# committed, as required by the submission guidelines.
 
 # Candidate datasets only; small reports remain eligible for Git
 data/candidates/
@@ -39,3 +39,7 @@ Desktop.ini
 *.temp
 ~$*
 *.log
+
+# Evaluator-testing data (ground truth) must never be committed; keep it only on Laptop 1
+evaluator_test.zip
+evaluator_test/
