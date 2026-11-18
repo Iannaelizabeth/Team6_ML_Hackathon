@@ -86,6 +86,100 @@ def sample_observations_per_trip(df: pd.DataFrame, max_observations_per_trip: in
     return pd.concat(sampled).sort_index().reset_index(drop=True) if sampled else df.iloc[0:0].copy()
 
 
+def route_continuity(route_arcs: list[int], arcs: np.ndarray) -> tuple[float, int, int]:
+    """Return connected-transition fraction, discontinuity count, and transitions."""
+    route = np.asarray(route_arcs, dtype=int)
+    if len(route) == 0:
+        return float("nan"), 0, 0
+    if len(route) == 1:
+        return 1.0, 0, 0
+    connected = arcs[route[:-1], 1] == arcs[route[1:], 0]
+    discontinuities = int((~connected).sum())
+    return float(connected.mean()), discontinuities, len(connected)
+
+
+def classifier_only_continuity(model, candidate_rows: pd.DataFrame, features: list[str]) -> dict:
+    """Evaluate classifier-only route continuity on student-test trips.
+
+    The route/label fields are not used. Candidate features already loaded for
+    normal evaluation provide probabilities, while the reference route is
+    removed from each decoder Trip before decoding.
+    """
+    from src.data_contract import list_trips, load_trip as load_contract_trip, trip_from_points
+    from src.hmm import RoadGraph, classifier_only_decode
+    from src.preprocessing import DATA_ROOT, load_trip as load_raw_trip, preprocess_track
+
+    trip_index = list_trips(DATA_ROOT / "student_test")
+    total_discontinuities = total_transitions = 0
+    scored_trips = []
+    started = time.perf_counter()
+
+    for trip_id, trip_candidates in candidate_rows.groupby("trip_id", sort=True):
+        trip_id = str(trip_id)
+        if trip_id not in trip_index:
+            raise FileNotFoundError(f"Student-test trip {trip_id} is missing from {DATA_ROOT}")
+
+        raw = load_raw_trip("student_test", trip_id)
+        clean_track, _ = preprocess_track(raw["track"])
+        base_trip = load_contract_trip(trip_index[trip_id], trip_id)
+        base_trip.route = None
+        trip = trip_from_points(
+            base_trip,
+            [
+                {"lat": row.latitude, "lon": row.longitude, "t": row.timestamp}
+                for row in clean_track.itertuples(index=False)
+            ],
+        )
+
+        observation_positions = {
+            int(observation_id): position
+            for position, observation_id in enumerate(clean_track.observation_id.to_numpy())
+        }
+        point_idx = trip_candidates.observation_id.map(observation_positions)
+        if point_idx.isna().any():
+            raise ValueError(f"Candidate observations do not align with trip {trip_id}")
+
+        arc = pd.to_numeric(trip_candidates.candidate_arc_id, errors="raise").to_numpy(dtype=int)
+        if ((arc < 0) | (arc >= len(trip.arcs))).any():
+            raise ValueError(f"Candidate arc IDs are outside the network for trip {trip_id}")
+        fraction = pd.to_numeric(trip_candidates.projection_ratio, errors="raise").to_numpy(dtype=float)
+        endpoints = trip.arcs[arc]
+        start = trip.nodes_xy[endpoints[:, 0]]
+        end = trip.nodes_xy[endpoints[:, 1]]
+        projected = start + fraction[:, None] * (end - start)
+        decoder_candidates = pd.DataFrame({
+            "point_idx": point_idx.to_numpy(dtype=int),
+            "arc": arc,
+            "frac_along": fraction,
+            "dist_m": pd.to_numeric(
+                trip_candidates.perpendicular_distance, errors="raise"
+            ).to_numpy(dtype=float),
+            "proj_x": projected[:, 0],
+            "proj_y": projected[:, 1],
+        })
+        probabilities = model.predict_proba(trip_candidates[features])[:, 1]
+        result = classifier_only_decode(
+            trip, decoder_candidates, probabilities, graph=RoadGraph(trip)
+        )
+        continuity, discontinuities, transitions = route_continuity(result.route_arcs, trip.arcs)
+        if transitions:
+            scored_trips.append(continuity)
+            total_discontinuities += discontinuities
+            total_transitions += transitions
+
+    if not scored_trips:
+        raise ValueError("No student-test route transitions were available for continuity scoring")
+    return {
+        "route_continuity": float(
+            (total_transitions - total_discontinuities) / total_transitions
+        ),
+        "n_discontinuities": total_discontinuities,
+        "continuity_transitions": total_transitions,
+        "continuity_trips": len(scored_trips),
+        "continuity_runtime_seconds": time.perf_counter() - started,
+    }
+
+
 def _plt():
     try:
         import matplotlib
@@ -142,6 +236,8 @@ def run(spec) -> dict:
     ap.add_argument("--tag", default="", help="suffix for output files, e.g. _tuned")
     ap.add_argument("--max-observations-per-trip", type=int, default=DEFAULT_MAX_OBSERVATIONS_PER_TRIP,
                     help="deterministic training observation cap per trip; use 0 for all observations")
+    ap.add_argument("--skip-continuity", action="store_true",
+                    help="skip classifier-only road-route continuity scoring on student-test trips")
     a = ap.parse_args()
 
     if a.max_observations_per_trip < 0:
@@ -197,6 +293,21 @@ def run(spec) -> dict:
     st["candidate_miss_rate"] = candidate_miss_rate(test_all)
     st["confusion_matrix"] = confusion_matrix(test["label"], (p >= 0.5).astype(int), labels=[0, 1]).tolist()
     st.update(train_seconds=train_s, inference_seconds=infer_s, inference_seconds_per_row=infer_s / max(1, len(test)))
+    if a.skip_continuity:
+        continuity_results = {
+            "route_continuity": None,
+            "n_discontinuities": None,
+            "continuity_transitions": 0,
+            "continuity_trips": 0,
+            "continuity_skipped": True,
+        }
+    else:
+        print("\nScoring classifier-only route continuity on student-test trips ...")
+        continuity_results = classifier_only_continuity(model, test_all, features)
+        continuity_results["continuity_skipped"] = False
+        print(f"  route_continuity={continuity_results['route_continuity']:.4f} "
+              f"n_discontinuities={continuity_results['n_discontinuities']}")
+    st.update(continuity_results)
     st = {k: (float(v) if isinstance(v, np.floating) else v) for k, v in st.items()}
 
     extra = spec.extra_results(model, features) if hasattr(spec, "extra_results") else {}
@@ -205,6 +316,7 @@ def run(spec) -> dict:
                "params": full_params, "random_state": RANDOM_STATE, "radius_m": a.radius,
                "max_candidates": MAX_CANDIDATES, "max_observations_per_trip": max_observations_per_trip,
                "training_rows_before_sampling": full_train_rows, "training_rows": len(train),
+               "training_rows_used": len(train),
                "training_observations_before_sampling": full_train_observations,
                "training_observations": len(train[["trip_id", "observation_id"]].drop_duplicates()),
                "features": features, "folds": a.folds,
