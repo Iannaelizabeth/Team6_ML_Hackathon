@@ -1,33 +1,134 @@
-"""Inference adapter joining the team feature pipeline to HMM/Viterbi decoding."""
+"""Inference adapter joining team candidate features to HMM/Viterbi decoding."""
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+
+import numpy as np
 import pandas as pd
 
-from src.candidate_generation import generate_trip_candidates
-from src.data_contract import load_trip as load_decoder_trip
-from src.data_contract import trip_from_points
-from src.feature_engineering import engineer_trip_candidates
-from src.hmm import HMMConfig, predict_candidate_proba, run_decoder
-from src.preprocessing import DATA_ROOT, discover_trips, load_trip, preprocess_track
+from src.candidate_generation import (
+    MAX_CANDIDATES,
+    build_segment_index,
+    create_local_transformer,
+    find_candidates,
+    project_coordinates,
+)
+from src.data_contract import Trip, load_trip as load_decoder_trip, trip_from_points
+from src.feature_engineering import (
+    ENGINEERED_FEATURES,
+    ORIGINAL_FEATURES,
+    engineer_trip_candidates,
+)
+from src.hmm import HMMConfig, MatchResult, RoadGraph, predict_candidate_proba, run_decoder
+from src.preprocessing import DATA_ROOT, PROJECT_ROOT, discover_trips, load_trip, preprocess_track
+
+MODEL_DIR = PROJECT_ROOT / "outputs" / "models"
+HMM_CONFIG_PATH = MODEL_DIR / "hmm_config.json"
 
 
-def match_student_trip(trip_id: str, artifact: dict) -> dict:
-    """Match one known student-test trip without returning or using its reference route."""
-    available = set(discover_trips("student_test"))
-    if trip_id not in available:
-        raise KeyError(f"Unknown student-test trip: {trip_id}")
+@dataclass
+class PreparedMatch:
+    partition: str
+    trip_id: str
+    trip: Trip
+    features: pd.DataFrame
+    decoder_candidates: pd.DataFrame
+    probabilities: np.ndarray
+    artifact: dict
+    config: HMMConfig
+    graph: RoadGraph
+
+
+def load_hmm_config() -> HMMConfig:
+    """Load calibrated HMM values if available, otherwise use decoder defaults."""
+    if not HMM_CONFIG_PATH.is_file():
+        return HMMConfig()
+    with HMM_CONFIG_PATH.open(encoding="utf-8") as file:
+        return HMMConfig.from_dict(json.load(file))
+
+
+def _generate_candidates(partition: str, trip_id: str, raw: dict,
+                          clean_track: pd.DataFrame, radius: int) -> pd.DataFrame:
+    """Use the team spatial candidate functions without passing reference routes."""
+    if "route" in raw:
+        raise ValueError("Reference route must be removed before candidate generation")
+
+    transformer = create_local_transformer(raw["nodes"])
+    segment_index = build_segment_index(raw["nodes"], raw["arcs"], transformer)
+    gps_x, gps_y = project_coordinates(
+        clean_track.longitude.to_numpy(dtype=float),
+        clean_track.latitude.to_numpy(dtype=float),
+        transformer,
+    )
+    gps_x, gps_y = np.asarray(gps_x), np.asarray(gps_y)
+    valid_gps = np.isfinite(gps_x) & np.isfinite(gps_y)
+    rows = []
+    for position, (_, observation) in enumerate(clean_track.iterrows()):
+        candidates = []
+        if valid_gps[position]:
+            candidates = find_candidates(
+                gps_x[position],
+                gps_y[position],
+                observation["observation_id"],
+                segment_index,
+                radius,
+                MAX_CANDIDATES,
+            )
+        rows.extend({
+            "trip_id": str(trip_id),
+            "partition": partition,
+            "timestamp": float(observation["timestamp"]),
+            **candidate,
+        } for candidate in candidates)
+
+    columns = [
+        "trip_id",
+        "partition",
+        "timestamp",
+        "observation_id",
+        "candidate_arc_id",
+        "perpendicular_distance",
+        "projection_ratio",
+        "road_length",
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def prepare_match(partition: str, trip_id: str, artifact: dict) -> PreparedMatch:
+    """Build prediction inputs with reference routes removed from the pipeline."""
+    if trip_id not in set(discover_trips(partition)):
+        raise KeyError(f"Unknown trip {trip_id!r} in partition {partition!r}")
 
     radius = int(artifact.get("radius_m", 50))
-    raw = load_trip("student_test", trip_id)
-    clean_track, _ = preprocess_track(raw["track"])
-    candidates, _ = generate_trip_candidates("student_test", trip_id, radius)
-    if candidates.empty:
-        raise ValueError(f"No road candidates were generated for trip {trip_id}")
-    features = engineer_trip_candidates(candidates, clean_track, raw["nodes"], raw["arcs"])
+    loaded_data = load_trip(partition, trip_id)
+    prediction_data = {key: value for key, value in loaded_data.items() if key != "route"}
+    del loaded_data
+    if "route" in prediction_data:
+        raise AssertionError("Reference route leaked into prediction inputs")
 
-    base = load_decoder_trip(DATA_ROOT / "student_test" / trip_id, trip_id)
+    clean_track, _ = preprocess_track(prediction_data["track"])
+    candidates = _generate_candidates(
+        partition, trip_id, prediction_data, clean_track, radius
+    )
+    if candidates.empty:
+        features = pd.DataFrame(columns=[
+            *candidates.columns,
+            *ORIGINAL_FEATURES,
+            *ENGINEERED_FEATURES,
+        ])
+    else:
+        features = engineer_trip_candidates(
+            candidates,
+            clean_track,
+            prediction_data["nodes"],
+            prediction_data["arcs"],
+        )
+
+    base_trip = load_decoder_trip(DATA_ROOT / partition / trip_id, trip_id)
+    base_trip.route = None
     trip = trip_from_points(
-        base,
+        base_trip,
         [
             {"lat": row.latitude, "lon": row.longitude, "t": row.timestamp}
             for row in clean_track.itertuples(index=False)
@@ -35,42 +136,87 @@ def match_student_trip(trip_id: str, artifact: dict) -> dict:
     )
     trip.route = None
 
-    observation_positions = {
-        int(observation_id): position
-        for position, observation_id in enumerate(clean_track.observation_id.to_numpy())
-    }
-    point_idx = features.observation_id.map(observation_positions)
-    if point_idx.isna().any():
-        raise ValueError("Candidate features contain observations absent from the cleaned track")
+    if features.empty:
+        decoder_candidates = pd.DataFrame(columns=[
+            "point_idx", "arc", "frac_along", "dist_m", "proj_x", "proj_y",
+        ])
+    else:
+        observation_positions = {
+            int(observation_id): position
+            for position, observation_id in enumerate(clean_track.observation_id.to_numpy())
+        }
+        point_idx = features.observation_id.map(observation_positions)
+        if point_idx.isna().any():
+            raise ValueError(f"Candidate observations do not align with trip {trip_id}")
 
-    arc = pd.to_numeric(features.candidate_arc_id, errors="raise").to_numpy(dtype=int)
-    fraction = pd.to_numeric(features.projection_ratio, errors="raise").to_numpy(dtype=float)
-    endpoints = trip.arcs[arc]
-    start = trip.nodes_xy[endpoints[:, 0]]
-    end = trip.nodes_xy[endpoints[:, 1]]
-    projected = start + fraction[:, None] * (end - start)
-    decoder_candidates = pd.DataFrame({
-        "point_idx": point_idx.to_numpy(dtype=int),
-        "arc": arc,
-        "frac_along": fraction,
-        "dist_m": pd.to_numeric(features.perpendicular_distance, errors="raise").to_numpy(dtype=float),
-        "proj_x": projected[:, 0],
-        "proj_y": projected[:, 1],
-    })
+        arc = pd.to_numeric(features.candidate_arc_id, errors="raise").to_numpy(dtype=int)
+        if ((arc < 0) | (arc >= len(trip.arcs))).any():
+            raise ValueError(f"Candidate arc IDs are outside the network for trip {trip_id}")
+        fraction = pd.to_numeric(features.projection_ratio, errors="raise").to_numpy(dtype=float)
+        endpoints = trip.arcs[arc]
+        start = trip.nodes_xy[endpoints[:, 0]]
+        end = trip.nodes_xy[endpoints[:, 1]]
+        projected = start + fraction[:, None] * (end - start)
+        decoder_candidates = pd.DataFrame({
+            "point_idx": point_idx.to_numpy(dtype=int),
+            "arc": arc,
+            "frac_along": fraction,
+            "dist_m": pd.to_numeric(
+                features.perpendicular_distance, errors="raise"
+            ).to_numpy(dtype=float),
+            "proj_x": projected[:, 0],
+            "proj_y": projected[:, 1],
+        })
 
     probabilities = predict_candidate_proba(artifact, features)
-    result = run_decoder(
-        "hmm_classifier",
-        trip,
-        decoder_candidates,
-        HMMConfig(),
-        artifact,
-        proba=probabilities,
+    config = load_hmm_config()
+    graph = RoadGraph(trip, config.sp_limit_m)
+    return PreparedMatch(
+        partition=partition,
+        trip_id=trip_id,
+        trip=trip,
+        features=features,
+        decoder_candidates=decoder_candidates,
+        probabilities=probabilities,
+        artifact=artifact,
+        config=config,
+        graph=graph,
+    )
+
+
+def decode_prepared(prepared: PreparedMatch, decoder: str = "hmm_classifier") -> MatchResult:
+    """Decode prepared inputs; `prepared.trip.route` is always None."""
+    if prepared.trip.route is not None:
+        raise ValueError("Decoder trip unexpectedly contains a reference route")
+    return run_decoder(
+        decoder,
+        prepared.trip,
+        prepared.decoder_candidates,
+        prepared.config,
+        prepared.artifact,
+        graph=prepared.graph,
+        proba=prepared.probabilities,
+    )
+
+
+def match_trip(partition: str, trip_id: str, artifact: dict) -> dict:
+    """Match and evaluate one trip, returning predictions and metrics only."""
+    prepared = prepare_match(partition, trip_id, artifact)
+    result = decode_prepared(prepared, "hmm_classifier")
+
+    from src.route_evaluation import evaluate_prediction
+
+    evaluation = evaluate_prediction(
+        partition,
+        trip_id,
+        result,
+        prepared.decoder_candidates,
+        prepared.trip,
     )
     matched = result.matched
     gps_points = [
         [float(lon), float(lat)]
-        for lon, lat in zip(trip.track.lon, trip.track.lat)
+        for lon, lat in zip(prepared.trip.track.lon, prepared.trip.track.lat)
     ]
     snapped_points = [
         [float(row.snap_lon), float(row.snap_lat)]
@@ -82,11 +228,12 @@ def match_student_trip(trip_id: str, artifact: dict) -> dict:
     ]
     route_coordinates: list[list[float]] = []
     for arc_id in result.route_arcs:
-        latlon = trip.arc_latlon(int(arc_id))
+        latlon = prepared.trip.arc_latlon(int(arc_id))
         route_coordinates.extend([[float(lon), float(lat)] for lat, lon in latlon])
 
     return {
         "trip_id": trip_id,
+        "partition": partition,
         "decoder": result.decoder,
         "gps_points": gps_points,
         "snapped_points": snapped_points,
@@ -98,4 +245,10 @@ def match_student_trip(trip_id: str, artifact: dict) -> dict:
         "sequence_breaks": result.n_breaks,
         "unfilled_route_gaps": result.gaps_unfilled,
         "runtime_ms": result.runtime_ms,
+        "evaluation": evaluation,
     }
+
+
+def match_student_trip(trip_id: str, artifact: dict) -> dict:
+    """Backward-compatible wrapper for the student-test partition."""
+    return match_trip("student_test", trip_id, artifact)

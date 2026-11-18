@@ -28,7 +28,7 @@
     <h1>PathSnap Route Evaluator</h1>
     <div>Model 3 HistGradientBoosting with HMM/Viterbi route reconstruction</div>
     <div class="controls">
-      <label for="trip">Student-test trip</label>
+      <label id="trip-label" for="trip">Evaluation trip</label>
       <select id="trip"><option value="">Loading trips…</option></select>
       <button id="match" type="button">Reconstruct route</button>
     </div>
@@ -52,6 +52,7 @@
     const statusText = document.getElementById("status");
     const svg = document.getElementById("map");
     const metrics = document.getElementById("metrics");
+    const tripLabel = document.getElementById("trip-label");
     const NS = "http://www.w3.org/2000/svg";
 
     function drawRoute(data) {
@@ -93,12 +94,22 @@
 
     function showMetrics(data) {
       metrics.replaceChildren();
+      const evaluation = data.evaluation || {};
+      const percentage = value => value == null ? "N/A" : `${(value * 100).toFixed(1)}%`;
       const values = [
         ["Matched fixes", `${data.matched_points} / ${data.gps_points.length}`],
         ["Unmatched fixes", data.unmatched_points],
         ["Route arcs", data.route_arc_count],
         ["Sequence breaks", data.sequence_breaks],
         ["Unfilled gaps", data.unfilled_route_gaps],
+        ["Pointwise accuracy", percentage(evaluation.pointwise_accuracy)],
+        ["Candidate miss rate", percentage(evaluation.candidate_miss_rate)],
+        ["Route precision", percentage(evaluation.route_precision)],
+        ["Route recall", percentage(evaluation.route_recall)],
+        ["Route F1", percentage(evaluation.route_f1)],
+        ["Route mismatch", percentage(evaluation.route_mismatch_fraction)],
+        ["Route continuity", percentage(evaluation.route_continuity)],
+        ["Evaluable observations", evaluation.evaluable_observations ?? 0],
         ["Runtime", `${data.runtime_ms.toFixed(1)} ms`]
       ];
       for (const [label, value] of values) {
@@ -121,14 +132,15 @@
         if (!healthResponse.ok || !tripsResponse.ok) throw new Error("Backend is unavailable.");
         const health = await healthResponse.json();
         const tripData = await tripsResponse.json();
-        statusText.textContent = `Ready · ${health.model} · ${health.decoder} · ${health.model_artifact}`;
+        tripLabel.textContent = `${tripData.partition} trip`;
+        statusText.textContent = `Ready · ${health.model} · ${health.decoder} · ${health.model_artifact} · ${health.trip_count} trips`;
         tripSelect.replaceChildren();
         for (const id of tripData.trips) {
           const option = document.createElement("option");
           option.value = id; option.textContent = id;
           tripSelect.appendChild(option);
         }
-        if (!tripData.trips.length) statusText.textContent = "No student-test trips were found.";
+        if (!tripData.trips.length) statusText.textContent = `No trips were found in ${tripData.partition}.`;
       } catch (error) {
         statusText.textContent = error.message;
       }
