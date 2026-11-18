@@ -81,11 +81,42 @@ def grouped_cv_splits(frame, n_splits=3):
     return splits
 
 
+def _supports_sample_weight(model) -> bool:
+    """True if the pipeline's final classifier accepts ``sample_weight`` in fit().
+
+    MLPClassifier only gained ``sample_weight`` in scikit-learn 1.7.
+    """
+    from sklearn.utils.validation import has_fit_parameter
+    estimator = model.steps[-1][1] if hasattr(model, "steps") else model
+    return has_fit_parameter(estimator, "sample_weight")
+
+
+def _balanced_resample_indices(y, random_state=42):
+    """Row indices that oversample minority classes to balance (older sklearn fallback)."""
+    y = np.asarray(y, dtype=int)
+    rng = np.random.default_rng(random_state)
+    labels, counts = np.unique(y, return_counts=True)
+    target = counts.max()
+    parts = [np.flatnonzero(y == label) for label in labels]
+    parts = [np.concatenate([idx, rng.choice(idx, target - len(idx), replace=True)])
+             for idx in parts]
+    return rng.permutation(np.concatenate(parts))
+
+
+def fit_mlp_balanced(model, x, y):
+    """Fit an MLP pipeline with class balancing on any scikit-learn version."""
+    if _supports_sample_weight(model):
+        return model.fit(x, y, classifier__sample_weight=balanced_sample_weights(y))
+    idx = _balanced_resample_indices(y)
+    x_res = x.iloc[idx] if hasattr(x, "iloc") else np.asarray(x)[idx]
+    return model.fit(x_res, np.asarray(y)[idx])
+
+
 def _fit_model(name, model, x, y):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         if name.lower() == "mlp":
-            model.fit(x, y, classifier__sample_weight=balanced_sample_weights(y))
+            fit_mlp_balanced(model, x, y)
         else:
             model.fit(x, y)
     convergence = [str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)]

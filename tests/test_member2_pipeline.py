@@ -6,7 +6,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.evaluation import grouped_cv_splits
+from src.evaluation import fit_mlp_balanced, grouped_cv_splits
 from src.feature_engineering import (angular_difference_degrees,
                                      engineer_trip_candidates,
                                      geodesic_distance_m, track_context)
@@ -107,7 +107,7 @@ class ModelPipelineTests(unittest.TestCase):
         p = rf.predict_proba(x)
         self.assertEqual(p.shape, (40, 2)); self.assertTrue(np.allclose(p.sum(axis=1), 1))
         mlp = make_mlp({"hidden_layer_sizes": (4,), "max_iter": 3, "batch_size": 8}, random_state=1)
-        mlp.fit(x, y, classifier__sample_weight=np.ones(len(y)))
+        fit_mlp_balanced(mlp, x, y)
         q = mlp.predict_proba(x)
         self.assertEqual(q.shape, (40, 2)); self.assertTrue(np.allclose(q.sum(axis=1), 1))
 

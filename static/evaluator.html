@@ -4,167 +4,320 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PathSnap Route Evaluator</title>
+  <!-- Leaflet is vendored in static/vendor so the map library loads without internet.
+       Only the background street tiles need a connection. -->
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <script src="vendor/leaflet/leaflet.js"></script>
   <style>
-    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172033; background: #f3f6fb; }
-    body { max-width: 1100px; margin: 0 auto; padding: 24px; }
-    header, section { background: white; border: 1px solid #dce3ed; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
-    h1 { margin: 0 0 6px; font-size: 1.5rem; }
-    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
-    select, button { border: 1px solid #aebbd0; border-radius: 7px; padding: 9px 12px; font: inherit; }
-    button { color: white; background: #2459a6; border-color: #2459a6; cursor: pointer; }
-    button:disabled { opacity: .55; cursor: wait; }
-    #status { min-height: 1.5em; color: #45546b; }
-    #map { width: 100%; height: min(65vh, 620px); background: #eef3f8; border-radius: 8px; }
-    .legend { display: flex; flex-wrap: wrap; gap: 16px; color: #45546b; font-size: .9rem; }
-    .key { display: inline-block; width: 18px; height: 4px; margin-right: 6px; vertical-align: middle; }
-    .key.point { width: 8px; height: 8px; border-radius: 50%; }
-    #metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-    .metric { padding: 12px; border-radius: 8px; background: #f3f6fb; }
-    .metric strong { display: block; font-size: 1.2rem; }
+    :root {
+      --bg: #f4f6f9; --panel: #ffffff; --border: #e1e6ee; --text: #1b2433; --muted: #66748a;
+      --accent: #0f766e; --accent-soft: #e6f4f2;
+      --gps: #2563eb; --route: #e4572e; --matched: #15803d; --network: #9aa5b5;
+      font-family: "Segoe UI", system-ui, sans-serif; color: var(--text);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); }
+    .app { display: grid; grid-template-columns: 290px 1fr; min-height: 100vh; }
+
+    /* Sidebar */
+    aside { background: var(--panel); border-right: 1px solid var(--border); padding: 20px 16px;
+            display: flex; flex-direction: column; gap: 14px; }
+    .brand { font-size: 1.25rem; font-weight: 700; }
+    .brand small { display: block; font-size: .78rem; font-weight: 400; color: var(--muted); margin-top: 2px; }
+    .label { font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    input[type=search] { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; font: inherit; }
+    .decoder { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .decoder button { border: 0; background: transparent; padding: 8px 6px; font: inherit; font-size: .85rem; cursor: pointer; color: var(--muted); }
+    .decoder button.active { background: var(--accent); color: white; }
+    #trip-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    #trip-list button { width: 100%; text-align: left; border: 1px solid var(--border); background: var(--panel);
+                        border-radius: 8px; padding: 10px 12px; font: inherit; cursor: pointer; display: flex;
+                        justify-content: space-between; align-items: center; }
+    #trip-list button:hover { border-color: var(--accent); }
+    #trip-list button.active { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+    #trip-list button span { font-size: .75rem; color: var(--muted); font-weight: 400; }
+    #health { font-size: .78rem; color: var(--muted); line-height: 1.4; }
+
+    /* Main */
+    main { padding: 20px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .card strong { display: block; font-size: 1.5rem; margin: 4px 0 2px; }
+    .card small { color: var(--muted); font-size: .75rem; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .panel-head h2 { margin: 0; font-size: 1.05rem; }
+    #status { font-size: .85rem; color: var(--muted); }
+    #status.error { color: #b42318; }
+    #map { height: min(62vh, 600px); border-radius: 8px; background: #e9eef4; }
+    .legend { background: white; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+              font-size: .8rem; line-height: 1.7; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+    .legend i { display: inline-block; width: 18px; height: 4px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+    .legend i.dot { width: 10px; height: 10px; border-radius: 50%; margin-left: 4px; margin-right: 10px; }
+    #metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .metric { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+    .metric strong { display: block; font-size: 1.1rem; }
+    .metric span { font-size: .78rem; color: var(--muted); }
+    .busy { opacity: .55; pointer-events: none; }
+
+    @media (max-width: 820px) {
+      .app { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--border); }
+      #trip-list { max-height: 220px; }
+      main { padding: 16px; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>PathSnap Route Evaluator</h1>
-    <div>Model 3 HistGradientBoosting with HMM/Viterbi route reconstruction</div>
-    <div class="controls">
-      <label id="trip-label" for="trip">Evaluation trip</label>
-      <select id="trip"><option value="">Loading trips…</option></select>
-      <button id="match" type="button">Reconstruct route</button>
+<div class="app">
+  <aside>
+    <div class="brand">PathSnap<small>Map-matching &amp; route reconstruction</small></div>
+    <div>
+      <div class="label" style="margin-bottom:6px">Decoder</div>
+      <div class="decoder" role="group" aria-label="Decoder">
+        <button type="button" data-decoder="hmm_classifier" class="active">Classifier + HMM</button>
+        <button type="button" data-decoder="classifier_only">Classifier only</button>
+      </div>
     </div>
-    <p id="status" role="status">Loading model status…</p>
-  </header>
-  <section>
-    <div class="legend">
-      <span><i class="key" style="background:#50718f"></i>GPS track</span>
-      <span><i class="key" style="background:#d2543d"></i>Reconstructed road route</span>
-      <span><i class="key point" style="background:#297a58"></i>Matched points</span>
+    <div>
+      <div class="label" style="margin-bottom:6px" id="trip-heading">Evaluation trips</div>
+      <input type="search" id="search" placeholder="Find a trip…" aria-label="Find a trip">
     </div>
-    <svg id="map" role="img" aria-label="GPS track and reconstructed road route"></svg>
-  </section>
-  <section>
-    <h2>Match summary</h2>
-    <div id="metrics">Choose a trip to begin.</div>
-  </section>
-  <script>
-    const tripSelect = document.getElementById("trip");
-    const matchButton = document.getElementById("match");
-    const statusText = document.getElementById("status");
-    const svg = document.getElementById("map");
-    const metrics = document.getElementById("metrics");
-    const tripLabel = document.getElementById("trip-label");
-    const NS = "http://www.w3.org/2000/svg";
+    <ul id="trip-list"><li class="label">Loading trips…</li></ul>
+    <div id="health">Connecting to API…</div>
+  </aside>
 
-    function drawRoute(data) {
-      svg.replaceChildren();
-      const all = [...data.gps_points, ...data.route_coordinates, ...data.snapped_points];
-      if (!all.length) return;
-      const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
-      const minX = Math.min(...xs), maxX = Math.max(...xs);
-      const minY = Math.min(...ys), maxY = Math.max(...ys);
-      const width = svg.clientWidth || 900, height = svg.clientHeight || 500, pad = 24;
-      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-      const scale = Math.min((width - 2 * pad) / Math.max(maxX - minX, 1e-8),
-                             (height - 2 * pad) / Math.max(maxY - minY, 1e-8));
-      const project = p => [pad + (p[0] - minX) * scale,
-                            height - pad - (p[1] - minY) * scale];
-      const addLine = (points, color, strokeWidth) => {
-        if (points.length < 2) return;
-        const line = document.createElementNS(NS, "polyline");
-        line.setAttribute("points", points.map(project).map(p => p.join(",")).join(" "));
-        line.setAttribute("fill", "none");
-        line.setAttribute("stroke", color);
-        line.setAttribute("stroke-width", strokeWidth);
-        line.setAttribute("stroke-linejoin", "round");
-        line.setAttribute("stroke-linecap", "round");
-        svg.appendChild(line);
-      };
-      const markerStep = Math.max(1, Math.ceil(data.snapped_points.length / 500));
-      for (let i = 0; i < data.snapped_points.length; i += markerStep) {
-        const point = data.snapped_points[i];
-        const circle = document.createElementNS(NS, "circle");
-        const [cx, cy] = project(point);
-        circle.setAttribute("cx", cx); circle.setAttribute("cy", cy);
-        circle.setAttribute("r", "1.8"); circle.setAttribute("fill", "#297a58");
-        svg.appendChild(circle);
-      }
-      addLine(data.gps_points, "#50718f", 2);
-      addLine(data.route_coordinates, "#d2543d", 3);
-    }
+  <main>
+    <div id="cards"></div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2 id="map-title">Route map</h2>
+        <div id="status" role="status">Select a trip to reconstruct its route.</div>
+      </div>
+      <div id="map"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>Server-side evaluation</h2></div>
+      <div id="metrics"><span class="label">Metrics appear after a trip is matched.</span></div>
+    </section>
+  </main>
+</div>
 
-    function showMetrics(data) {
-      metrics.replaceChildren();
-      const evaluation = data.evaluation || {};
-      const percentage = value => value == null ? "N/A" : `${(value * 100).toFixed(1)}%`;
-      const values = [
-        ["Matched fixes", `${data.matched_points} / ${data.gps_points.length}`],
-        ["Unmatched fixes", data.unmatched_points],
-        ["Route arcs", data.route_arc_count],
-        ["Sequence breaks", data.sequence_breaks],
-        ["Unfilled gaps", data.unfilled_route_gaps],
-        ["Pointwise accuracy", percentage(evaluation.pointwise_accuracy)],
-        ["Candidate miss rate", percentage(evaluation.candidate_miss_rate)],
-        ["Route precision", percentage(evaluation.route_precision)],
-        ["Route recall", percentage(evaluation.route_recall)],
-        ["Route F1", percentage(evaluation.route_f1)],
-        ["Route mismatch", percentage(evaluation.route_mismatch_fraction)],
-        ["Route continuity", percentage(evaluation.route_continuity)],
-        ["Evaluable observations", evaluation.evaluable_observations ?? 0],
-        ["Runtime", `${data.runtime_ms.toFixed(1)} ms`]
-      ];
-      for (const [label, value] of values) {
-        const card = document.createElement("div");
-        card.className = "metric";
-        const strong = document.createElement("strong");
-        strong.textContent = value;
-        const caption = document.createElement("span");
-        caption.textContent = label;
-        card.append(strong, caption);
-        metrics.appendChild(card);
-      }
-    }
+<script>
+  // ---- API location -------------------------------------------------------
+  // Two-laptop deployment: open this page on Laptop 2 with ?api=http://<laptop1-ip>:8000
+  // When served by the API itself (or no ?api= given) requests go to the same origin.
+  const API_BASE = (() => {
+    const fromQuery = new URLSearchParams(window.location.search).get("api");
+    let stored = null;
+    try { stored = localStorage.getItem("pathsnap_api"); } catch {}
+    const base = fromQuery || stored ||
+      (window.location.protocol.startsWith("http") ? window.location.origin : "http://127.0.0.1:8000");
+    if (fromQuery) { try { localStorage.setItem("pathsnap_api", fromQuery); } catch {} }
+    return base.replace(/\/+$/, "");
+  })();
+  const api = path => `${API_BASE}${path}`;
 
-    async function initialize() {
-      try {
-        const [healthResponse, tripsResponse] = await Promise.all([
-          fetch("/api/health"), fetch("/api/trips")
-        ]);
-        if (!healthResponse.ok || !tripsResponse.ok) throw new Error("Backend is unavailable.");
-        const health = await healthResponse.json();
-        const tripData = await tripsResponse.json();
-        tripLabel.textContent = `${tripData.partition} trip`;
-        statusText.textContent = `Ready · ${health.model} · ${health.decoder} · ${health.model_artifact} · ${health.trip_count} trips`;
-        tripSelect.replaceChildren();
-        for (const id of tripData.trips) {
-          const option = document.createElement("option");
-          option.value = id; option.textContent = id;
-          tripSelect.appendChild(option);
-        }
-        if (!tripData.trips.length) statusText.textContent = `No trips were found in ${tripData.partition}.`;
-      } catch (error) {
-        statusText.textContent = error.message;
-      }
-    }
+  const $ = id => document.getElementById(id);
+  const tripList = $("trip-list"), statusText = $("status"), cards = $("cards"), metrics = $("metrics");
+  let trips = [], selectedTrip = null, decoder = "hmm_classifier", busy = false;
 
-    matchButton.addEventListener("click", async () => {
-      if (!tripSelect.value) return;
-      matchButton.disabled = true;
-      statusText.textContent = "Generating candidates and reconstructing route…";
-      try {
-        const response = await fetch(`/api/trips/${encodeURIComponent(tripSelect.value)}/match`, { method: "POST" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "Route reconstruction failed.");
-        drawRoute(data);
-        showMetrics(data);
-        statusText.textContent = `Completed ${data.decoder} for ${data.trip_id}.`;
-      } catch (error) {
-        statusText.textContent = error.message;
-      } finally {
-        matchButton.disabled = false;
-      }
+  const pct = v => v == null ? "N/A" : `${(v * 100).toFixed(1)}%`;
+  const setStatus = (text, isError = false) => { statusText.textContent = text; statusText.classList.toggle("error", isError); };
+  const toLatLng = p => [p[1], p[0]];  // API sends [lon, lat]
+
+  // ---- Map ----------------------------------------------------------------
+  let map = null, overlay = null;
+  if (window.L) {
+    map = L.map("map", { preferCanvas: true, zoomControl: true }).setView([52.0, 5.0], 7);
+    const street = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+    const light = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      maxZoom: 19, attribution: "&copy; OpenStreetMap &copy; CARTO"
     });
+    map._baseLayers = { "Street map": street, "Light map": light };
 
-    initialize();
-  </script>
+    const legend = L.control({ position: "bottomleft" });
+    legend.onAdd = () => {
+      const div = L.DomUtil.create("div", "legend");
+      div.innerHTML =
+        `<div><i style="background:var(--network)"></i>Road network</div>
+         <div><i style="background:var(--gps)"></i>GPS trajectory</div>
+         <div><i style="background:var(--route);height:6px"></i>Reconstructed route</div>
+         <div><i class="dot" style="background:var(--matched)"></i>Start</div>
+         <div><i class="dot" style="background:#111827"></i>End</div>`;
+      return div;
+    };
+    legend.addTo(map);
+  } else {
+    $("map").innerHTML = '<p style="padding:16px">Map library failed to load (static/vendor/leaflet missing).</p>';
+  }
+  let layerControl = null;
+
+  function drawRoute(data) {
+    if (!map) return;
+    if (overlay) overlay.remove();
+    if (layerControl) layerControl.remove();
+    overlay = L.layerGroup().addTo(map);
+
+    const network = L.polyline((data.road_network || []).map(seg => seg.map(toLatLng)),
+      { color: "#9aa5b5", weight: 1.5, opacity: 0.7, interactive: false });
+    const route = L.polyline(data.route_coordinates.map(toLatLng),
+      { color: "#e4572e", weight: 7, opacity: 0.6 }).bindTooltip("Reconstructed route");
+    const gpsLatLngs = data.gps_points.map(toLatLng);
+    const gps = L.layerGroup([L.polyline(gpsLatLngs, { color: "#2563eb", weight: 2, opacity: 0.9 })
+      .bindTooltip("GPS trajectory")]);
+    const step = Math.max(1, Math.ceil(gpsLatLngs.length / 250));
+    for (let i = 0; i < gpsLatLngs.length; i += step) {
+      L.circleMarker(gpsLatLngs[i], { radius: 2, color: "#2563eb", weight: 1, fillOpacity: 1 }).addTo(gps);
+    }
+    const matched = L.layerGroup();
+    const mstep = Math.max(1, Math.ceil(data.snapped_points.length / 250));
+    for (let i = 0; i < data.snapped_points.length; i += mstep) {
+      L.circleMarker(toLatLng(data.snapped_points[i]),
+        { radius: 2.5, color: "#15803d", weight: 0, fillOpacity: 0.8 }).addTo(matched);
+    }
+    const ends = L.layerGroup();
+    if (gpsLatLngs.length) {
+      L.circleMarker(gpsLatLngs[0], { radius: 7, color: "white", weight: 2, fillColor: "#15803d", fillOpacity: 1 })
+        .bindTooltip("Start").addTo(ends);
+      L.circleMarker(gpsLatLngs[gpsLatLngs.length - 1], { radius: 7, color: "white", weight: 2, fillColor: "#111827", fillOpacity: 1 })
+        .bindTooltip("End").addTo(ends);
+    }
+    // back to front: network, route band, GPS, start/end
+    [network, route, gps, ends].forEach(layer => layer.addTo(overlay));
+
+    layerControl = L.control.layers(map._baseLayers, {
+      "Road network": network, "Reconstructed route": route, "GPS trajectory": gps,
+      "Matched points": matched, "Start / end": ends
+    }, { collapsed: true }).addTo(map);
+
+    const bounds = L.latLngBounds([...gpsLatLngs, ...data.route_coordinates.map(toLatLng)]);
+    if (bounds.isValid()) map.fitBounds(bounds, { padding: [24, 24] });
+  }
+
+  // ---- Cards & metrics ------------------------------------------------------
+  function renderCards(data) {
+    const items = data ? [
+      ["GPS observations", data.gps_points.length, "raw trajectory points"],
+      ["Matched observations", data.matched_points, `of ${data.gps_points.length} GPS points`],
+      ["Route arcs", data.route_arc_count, "road segments in route"],
+      ["Unmatched", data.unmatched_points, "observations without an arc"],
+      ["Pointwise accuracy", pct(data.evaluation?.pointwise_accuracy), "vs. server-side reference"],
+      ["Route continuity", pct(data.evaluation?.route_continuity), `${data.evaluation?.n_discontinuities ?? 0} discontinuities`],
+    ] : [
+      ["GPS observations", "–", "raw trajectory points"], ["Matched observations", "–", ""],
+      ["Route arcs", "–", ""], ["Unmatched", "–", ""], ["Pointwise accuracy", "–", ""], ["Route continuity", "–", ""],
+    ];
+    cards.replaceChildren(...items.map(([label, value, note]) => {
+      const card = document.createElement("div");
+      card.className = "card";
+      const l = document.createElement("div"); l.className = "label"; l.textContent = label;
+      const v = document.createElement("strong"); v.textContent = value;
+      const n = document.createElement("small"); n.textContent = note;
+      card.append(l, v, n);
+      return card;
+    }));
+  }
+
+  function renderMetrics(data) {
+    const e = data.evaluation || {};
+    const rows = [
+      ["Pointwise accuracy", pct(e.pointwise_accuracy)],
+      ["Candidate miss rate", pct(e.candidate_miss_rate)],
+      ["Route precision", pct(e.route_precision)],
+      ["Route recall", pct(e.route_recall)],
+      ["Route F1", pct(e.route_f1)],
+      ["Route mismatch", pct(e.route_mismatch_fraction)],
+      ["Route continuity", pct(e.route_continuity)],
+      ["Discontinuities", e.n_discontinuities ?? 0],
+      ["Evaluable observations", e.evaluable_observations ?? 0],
+      ["Sequence breaks", data.sequence_breaks],
+      ["Unfilled route gaps", data.unfilled_route_gaps],
+      ["Decoder runtime", `${data.runtime_ms.toFixed(1)} ms`],
+    ];
+    metrics.replaceChildren(...rows.map(([label, value]) => {
+      const div = document.createElement("div"); div.className = "metric";
+      const s = document.createElement("strong"); s.textContent = value;
+      const c = document.createElement("span"); c.textContent = label;
+      div.append(s, c);
+      return div;
+    }));
+  }
+
+  // ---- Trips ----------------------------------------------------------------
+  function renderTrips() {
+    const q = $("search").value.trim();
+    const shown = trips.filter(t => t.includes(q));
+    if (!shown.length) { tripList.innerHTML = '<li class="label">No matching trips.</li>'; return; }
+    tripList.replaceChildren(...shown.map((id, i) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = id;
+      const tag = document.createElement("span"); tag.textContent = `#${trips.indexOf(id) + 1}`;
+      b.appendChild(tag);
+      if (id === selectedTrip) b.classList.add("active");
+      b.addEventListener("click", () => matchTrip(id));
+      li.appendChild(b);
+      return li;
+    }));
+  }
+
+  async function matchTrip(id) {
+    if (busy) return;
+    busy = true; selectedTrip = id; renderTrips();
+    document.querySelector("main").classList.add("busy");
+    const label = decoder === "hmm_classifier" ? "classifier + HMM/Viterbi" : "classifier only";
+    setStatus(`Reconstructing trip ${id} (${label})…`);
+    try {
+      let response;
+      try {
+        response = await fetch(api(`/api/trips/${encodeURIComponent(id)}/match?decoder=${decoder}`), { method: "POST" });
+      } catch {
+        throw new Error(`Cannot reach the API at ${API_BASE}. Is uvicorn running on Laptop 1?`);
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Route reconstruction failed.");
+      $("map-title").textContent = `Trip ${data.trip_id}`;
+      drawRoute(data); renderCards(data); renderMetrics(data);
+      setStatus(`Done · ${label} · ${data.runtime_ms.toFixed(0)} ms`);
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      busy = false;
+      document.querySelector("main").classList.remove("busy");
+    }
+  }
+
+  document.querySelectorAll(".decoder button").forEach(btn => btn.addEventListener("click", () => {
+    decoder = btn.dataset.decoder;
+    document.querySelectorAll(".decoder button").forEach(b => b.classList.toggle("active", b === btn));
+    if (selectedTrip) matchTrip(selectedTrip);
+  }));
+  $("search").addEventListener("input", renderTrips);
+
+  async function initialize() {
+    renderCards(null);
+    try {
+      const [h, t] = await Promise.all([fetch(api("/api/health")), fetch(api("/api/trips"))]);
+      if (!h.ok || !t.ok) throw new Error(`Backend at ${API_BASE} is unavailable.`);
+      const health = await h.json(), tripData = await t.json();
+      trips = tripData.trips;
+      $("trip-heading").textContent = `${tripData.partition} trips (${trips.length})`;
+      $("health").textContent = `API ${API_BASE} · ${health.model} · ${health.model_artifact} · radius ${health.radius_m} m`;
+      renderTrips();
+    } catch (err) {
+      const msg = err instanceof TypeError
+        ? `Cannot reach the API at ${API_BASE}. Open this page with ?api=http://<laptop1-ip>:8000`
+        : err.message;
+      $("health").textContent = msg;
+      tripList.innerHTML = "";
+      setStatus(msg, true);
+    }
+  }
+  initialize();
+</script>
 </body>
 </html>

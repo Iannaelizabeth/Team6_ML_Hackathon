@@ -65,6 +65,7 @@ def compare_decoders(partition: str = "student_test") -> tuple[pd.DataFrame, pd.
         "route_f1",
         "route_mismatch_fraction",
         "route_continuity",
+        "n_discontinuities",
         "evaluable_observations",
         "runtime_ms",
         "boosting_iterations",

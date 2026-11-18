@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import logging
+import re
 import sys
 import time
 from functools import lru_cache
@@ -10,7 +11,9 @@ from pathlib import Path
 
 import joblib
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.preprocessing import PROJECT_ROOT, discover_trips
 from src.route_matching import load_hmm_config, match_trip as match_partition_trip
@@ -18,6 +21,20 @@ from src.route_matching import load_hmm_config, match_trip as match_partition_tr
 MODEL_DIR = PROJECT_ROOT / "outputs" / "models"
 UI_PATH = PROJECT_ROOT / "static" / "evaluator.html"
 app = FastAPI(title="PathSnap Route Evaluator", version="1.0.0")
+# Two-laptop deployment: the UI is served from Laptop 2 and calls this API on Laptop 1,
+# so cross-origin requests must be allowed. Restrict with PATHSNAP_CORS_ORIGINS
+# (comma-separated, e.g. "http://192.168.1.20:5500") if desired.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.environ.get("PATHSNAP_CORS_ORIGINS", "*").split(",") if o.strip()],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+TRIP_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+DECODERS = {"hmm_classifier", "classifier_only"}
+VENDOR_DIR = PROJECT_ROOT / "static" / "vendor"
+if VENDOR_DIR.is_dir():  # local copy of Leaflet so the UI map works without a CDN
+    app.mount("/vendor", StaticFiles(directory=VENDOR_DIR), name="vendor")
 logger = logging.getLogger("pathsnap.api")
 logger.setLevel(logging.INFO)
 logger.propagate = False
@@ -98,16 +115,22 @@ def trips() -> dict:
 
 
 @app.post("/api/trips/{trip_id}/match")
-def match_trip(trip_id: str) -> dict:
+def match_trip(trip_id: str, decoder: str = "hmm_classifier") -> dict:
     partition = _eval_partition()
     started = time.perf_counter()
+    if not TRIP_ID_PATTERN.fullmatch(trip_id):
+        raise HTTPException(status_code=400, detail="Invalid trip id")
+    if decoder not in DECODERS:
+        raise HTTPException(status_code=400, detail=f"decoder must be one of {sorted(DECODERS)}")
+    logger.info("request trip_id=%s partition=%s decoder=%s", trip_id, partition, decoder)
     try:
         artifact, _ = _load_artifact()
-        result = match_partition_trip(partition, trip_id, artifact)
+        result = match_partition_trip(partition, trip_id, artifact, decoder=decoder)
         evaluation = result["evaluation"]
         logger.info(
             "match trip_id=%s partition=%s decoder=%s observations=%d "
-            "pointwise_accuracy=%s route_f1=%s route_continuity=%s runtime_ms=%.1f",
+            "pointwise_accuracy=%s route_f1=%s route_continuity=%s "
+            "n_discontinuities=%s runtime_ms=%.1f",
             trip_id,
             partition,
             result["decoder"],
@@ -115,6 +138,7 @@ def match_trip(trip_id: str) -> dict:
             evaluation["pointwise_accuracy"],
             evaluation["route_f1"],
             evaluation["route_continuity"],
+            evaluation.get("n_discontinuities"),
             (time.perf_counter() - started) * 1000,
         )
         return result

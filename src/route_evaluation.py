@@ -28,21 +28,22 @@ def _route_overlap(predicted: list[int], reference: np.ndarray,
     return precision, recall, f1, mismatch
 
 
-def _route_continuity(route_arcs: list[int], graph: RoadGraph) -> float | None:
-    if not route_arcs:
-        return None
-    if len(route_arcs) == 1:
-        return 1.0
-    connected = 0
-    for arc_a, arc_b in zip(route_arcs, route_arcs[1:]):
+def _route_continuity(matched: pd.DataFrame, graph: RoadGraph) -> tuple[float | None, int]:
+    predicted_arcs = matched.sort_values("point_idx", kind="stable").arc.astype(int).tolist()
+    if not predicted_arcs:
+        return None, 0
+    if len(predicted_arcs) == 1:
+        return 1.0, 0
+
+    discontinuities = 0
+    for arc_a, arc_b in zip(predicted_arcs, predicted_arcs[1:]):
         if arc_a == arc_b:
-            connected += 1
             continue
         end_node = int(graph.trip.arcs[arc_a, 1])
         start_node = int(graph.trip.arcs[arc_b, 0])
         distance = graph.node_distance(end_node, start_node)
-        connected += int(np.isfinite(distance) and distance <= 50.0)
-    return float(connected / (len(route_arcs) - 1))
+        discontinuities += int(not np.isfinite(distance) or distance > 50.0)
+    return float(1.0 - discontinuities / (len(predicted_arcs) - 1)), discontinuities
 
 
 def evaluate_prediction(
@@ -98,7 +99,7 @@ def evaluate_prediction(
     route_precision, route_recall, route_f1, route_mismatch = _route_overlap(
         result.route_arcs, valid_reference, trip.arc_len
     )
-    continuity = _route_continuity(result.route_arcs, RoadGraph(trip))
+    continuity, n_discontinuities = _route_continuity(result.matched, RoadGraph(trip))
 
     return {
         "pointwise_accuracy": pointwise_accuracy,
@@ -108,5 +109,6 @@ def evaluate_prediction(
         "route_f1": route_f1,
         "route_mismatch_fraction": route_mismatch,
         "route_continuity": continuity,
+        "n_discontinuities": n_discontinuities,
         "evaluable_observations": int(evaluable),
     }

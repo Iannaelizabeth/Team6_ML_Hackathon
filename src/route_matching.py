@@ -199,10 +199,39 @@ def decode_prepared(prepared: PreparedMatch, decoder: str = "hmm_classifier") ->
     )
 
 
-def match_trip(partition: str, trip_id: str, artifact: dict) -> dict:
+def _road_network_segments(trip, margin_deg: float = 0.0015,
+                           max_segments: int = 50000) -> list[list[list[float]]]:
+    """Road-network arcs near the GPS track as [[lon, lat], [lon, lat]] pairs.
+
+    Map geometry only (no reference route), used as the UI background layer.
+    """
+    lat = trip.track.lat.to_numpy(dtype=float)
+    lon = trip.track.lon.to_numpy(dtype=float)
+    if len(lat) == 0 or len(trip.arcs) == 0:
+        return []
+    lat_min, lat_max = np.nanmin(lat) - margin_deg, np.nanmax(lat) + margin_deg
+    lon_min, lon_max = np.nanmin(lon) - margin_deg, np.nanmax(lon) + margin_deg
+    nodes = np.asarray(trip.nodes_ll, dtype=float)  # (N, 2) lat, lon
+    arcs = np.asarray(trip.arcs, dtype=int)
+    start, end = nodes[arcs[:, 0]], nodes[arcs[:, 1]]
+
+    def inside(points):
+        return ((points[:, 0] >= lat_min) & (points[:, 0] <= lat_max)
+                & (points[:, 1] >= lon_min) & (points[:, 1] <= lon_max))
+
+    keep = np.flatnonzero(inside(start) | inside(end))[:max_segments]
+    return [
+        [[round(float(start[i, 1]), 7), round(float(start[i, 0]), 7)],
+         [round(float(end[i, 1]), 7), round(float(end[i, 0]), 7)]]
+        for i in keep
+    ]
+
+
+def match_trip(partition: str, trip_id: str, artifact: dict,
+               decoder: str = "hmm_classifier") -> dict:
     """Match and evaluate one trip, returning predictions and metrics only."""
     prepared = prepare_match(partition, trip_id, artifact)
-    result = decode_prepared(prepared, "hmm_classifier")
+    result = decode_prepared(prepared, decoder)
 
     from src.route_evaluation import evaluate_prediction
 
@@ -231,10 +260,13 @@ def match_trip(partition: str, trip_id: str, artifact: dict) -> dict:
         latlon = prepared.trip.arc_latlon(int(arc_id))
         route_coordinates.extend([[float(lon), float(lat)] for lat, lon in latlon])
 
+    road_network = _road_network_segments(prepared.trip)
+
     return {
         "trip_id": trip_id,
         "partition": partition,
         "decoder": result.decoder,
+        "road_network": road_network,
         "gps_points": gps_points,
         "snapped_points": snapped_points,
         "matched_arcs": matched_arcs,

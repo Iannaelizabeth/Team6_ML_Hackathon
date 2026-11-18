@@ -18,7 +18,8 @@ from src.preprocessing import PROJECT_ROOT, load_trip, preprocess_track
 
 MAP_DIR = PROJECT_ROOT / "outputs" / "maps"
 REPORT_DIR = PROJECT_ROOT / "outputs" / "reports"
-CANDIDATE_DIR = PROJECT_ROOT / "data" / "candidates"
+# candidate_generation.py writes {partition}_candidates_r{radius}.csv here
+CANDIDATE_DIR = PROJECT_ROOT / "outputs" / "processed"
 
 
 def _arc_coordinates(nodes: pd.DataFrame, arcs: pd.DataFrame, arc_ids):

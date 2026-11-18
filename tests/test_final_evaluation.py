@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from src import api, route_evaluation
 from src.data_contract import Trip
 from src.hmm import HMMConfig, MatchResult, RoadGraph, run_decoder
+from src.route_evaluation import _route_continuity
 from src.route_matching import PreparedMatch
 
 
@@ -16,6 +17,7 @@ EVALUATION_KEYS = {
     "route_f1",
     "route_mismatch_fraction",
     "route_continuity",
+    "n_discontinuities",
     "evaluable_observations",
 }
 
@@ -78,6 +80,7 @@ def test_evaluate_prediction_scores_only_confident_points_and_returns_metrics(mo
     assert metrics["candidate_miss_rate"] == 0.0
     assert metrics["route_f1"] == 1.0
     assert metrics["route_continuity"] == 1.0
+    assert metrics["n_discontinuities"] == 0
     assert metrics["evaluable_observations"] == 2
 
 
@@ -90,6 +93,7 @@ def test_match_response_has_metrics_without_reference_fields(monkeypatch):
         "route_f1": 1.0,
         "route_mismatch_fraction": 0.0,
         "route_continuity": 1.0,
+        "n_discontinuities": 0,
         "evaluable_observations": 2,
     }
     response = {
@@ -100,7 +104,7 @@ def test_match_response_has_metrics_without_reference_fields(monkeypatch):
     }
     calls = {}
 
-    def fake_match(partition, trip_id, artifact):
+    def fake_match(partition, trip_id, artifact, decoder="hmm_classifier"):
         calls.update(partition=partition, trip_id=trip_id, artifact=artifact)
         return response
 
@@ -144,6 +148,29 @@ def test_decoder_accepts_trip_without_route():
 
     assert trip.route is None
     assert result.matched["arc"].tolist() == [0]
+
+
+def test_route_continuity_uses_observation_predictions_not_gap_filled_route():
+    trip = Trip(
+        trip_id="discontinuous",
+        track=pd.DataFrame({
+            "lat": [0.0, 0.0], "lon": [0.0, 0.001], "t": [0.0, 1.0],
+            "x": [0.0, 80.0], "y": [0.0, 0.0],
+        }),
+        nodes_ll=np.array([[0.0, 0.0], [0.0, 0.0001], [0.0, 0.0007], [0.0, 0.0008]]),
+        nodes_xy=np.array([[0.0, 0.0], [10.0, 0.0], [70.0, 0.0], [80.0, 0.0]]),
+        arcs=np.array([[0, 1], [1, 2], [2, 3]]),
+        route=None,
+        origin=(0.0, 0.0),
+        arc_len=np.array([10.0, 60.0, 10.0]),
+        arc_bearing=np.array([90.0, 90.0, 90.0]),
+    )
+    matched = pd.DataFrame({"point_idx": [1, 0], "arc": [2, 0]})
+
+    continuity, discontinuities = _route_continuity(matched, RoadGraph(trip))
+
+    assert continuity == 0.0
+    assert discontinuities == 1
 
 
 def test_match_trip_serializes_prediction_without_reference_fields(monkeypatch):

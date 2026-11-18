@@ -206,7 +206,7 @@ python -m pip install -r requirements.txt
 Install the additional machine-learning dependencies if they are not already included:
 
 ```bash
-python -m pip install xgboost scikit-learn optuna seaborn joblib
+python -m pip install xgboost
 ```
 
 ## Running the Project
@@ -221,7 +221,67 @@ The project contains separate modules for preprocessing, candidate generation, f
 
 Run the appropriate project pipeline or experiment entry point after configuring the dataset paths and required inputs.
 
-**Note:** Refer to the source modules and project documentation for the exact execution sequence and input requirements. No single application entry-point command is assumed here.
+### Generating Folium maps
+
+```bash
+# GPS + road network + reference route + predicted routes (classifier-only and HMM)
+python -m src.maps_prediction --partition student_test --all
+# GPS + reference route + candidate segments, plus static trajectory/network PNGs
+python -m src.maps_advanced --partition train --trip-id 00000001
+```
+
+Maps are written to `outputs/maps/` (open the `.html` files in a browser).
+
+### Running the tests
+
+```bash
+python -m pytest -q
+```
+
+## Deployment (Two-Laptop Evaluation)
+
+| Laptop | Role |
+|---|---|
+| Laptop 1 | FastAPI backend: trained model, HMM/Viterbi decoder, road network and server-side evaluation |
+| Laptop 2 | Evaluator UI (`static/evaluator.html`): lists the 10 evaluation trips, sends the selected trip ID to the API and shows the returned route and metrics |
+
+### Laptop 1 – start the API
+
+```powershell
+# Choose the partition to serve (default: student_test). For the final evaluation:
+$env:PATHSNAP_EVAL_PARTITION = "evaluator_test"
+# Optional: use a specific model artifact (default: outputs/models/model_3_tuned.joblib)
+# $env:PATHSNAP_MODEL_PATH = "outputs/models/model_3_tuned.joblib"
+
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
+```
+
+Find Laptop 1's IP address with `ipconfig`, and allow port 8000 through the Windows firewall if prompted. Every inference request is logged in this terminal (`request trip_id=...` and `match trip_id=... pointwise_accuracy=...`); show these logs to the evaluator.
+
+Endpoints:
+
+- `GET  /api/health` – model, decoder and partition status
+- `GET  /api/trips` – trip IDs in the served partition
+- `POST /api/trips/{trip_id}/match` – runs the full pipeline (candidates → classifier → HMM/Viterbi) and returns the predicted route and server-side metrics. Ground-truth routes are never included in the response.
+
+### Laptop 2 – start the UI
+
+Copy the `static/` folder to Laptop 2 (or clone the repo), then serve it:
+
+```bash
+cd static
+python -m http.server 5500
+```
+
+Open in the browser on Laptop 2:
+
+```
+http://localhost:5500/evaluator.html?api=http://<LAPTOP1_IP>:8000
+```
+
+The API address is remembered for later visits. CORS is enabled on the API; to restrict it, set `PATHSNAP_CORS_ORIGINS` on Laptop 1 (for example `http://<LAPTOP2_IP>:5500`).
+
+For a single-machine check, open `http://127.0.0.1:8000/` after starting the API. The UI is also served directly by the backend.
 
 ## Candidate Generation Experiments
 
