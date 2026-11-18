@@ -32,6 +32,11 @@ def _heading(lon1, lat1, lon2, lat2):
     return np.where(np.isfinite(distance) & (distance > 0.01), bearing, np.nan)
 
 
+def angular_difference_degrees(a, b):
+    """Smallest absolute circular difference between headings, in [0, 180]."""
+    return np.abs((np.asarray(a, dtype=float) - np.asarray(b, dtype=float) + 180.0) % 360.0 - 180.0)
+
+
 def track_context(track: pd.DataFrame) -> pd.DataFrame:
     """Calculate per-observation GPS motion features, isolated to one trip."""
     required = {"longitude", "latitude", "timestamp"}
@@ -116,7 +121,7 @@ def engineer_trip_candidates(candidates: pd.DataFrame, track: pd.DataFrame,
     arc_ok = np.isfinite(raw_ids) & (raw_ids % 1 == 0) & (raw_ids >= 0) & (raw_ids < len(arcs))
     safe_arc = np.where(arc_ok, raw_ids, 0).astype(int)
     out["road_heading"] = np.where(arc_ok, arc_heading[safe_arc], np.nan)
-    out["heading_difference"] = np.abs((out.gps_heading.to_numpy(dtype=float)-out.road_heading.to_numpy(dtype=float)+180) % 360 - 180)
+    out["heading_difference"] = angular_difference_degrees(out.gps_heading, out.road_heading)
     ratio = np.clip(pd.to_numeric(out.projection_ratio, errors="coerce").to_numpy(dtype=float), 0, 1)
     foot_x = x1[safe_arc] + ratio*(x2[safe_arc]-x1[safe_arc])
     foot_y = y1[safe_arc] + ratio*(y2[safe_arc]-y1[safe_arc])

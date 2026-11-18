@@ -1,8 +1,8 @@
 """Sequence-aware reference-route alignment and candidate binary labels.
 
-Route arc IDs come from `.route` in chronological order. GPS observations are
-aligned by a monotone Viterbi pass over nearby route arcs, with spatial emissions
-and temporal/geodesic progression costs. Ambiguous or unalignable observations
+    Route arc IDs come from `.route` in chronological order. GPS observations are
+aligned by a forward, monotone sequence matcher over nearby route arcs, with
+spatial distances and temporal/geodesic progression costs. Ambiguous or unalignable observations
 are retained in diagnostics and receive nullable labels in candidate exports.
 """
 from __future__ import annotations
@@ -58,11 +58,12 @@ def align_track_to_route(track: pd.DataFrame, nodes: pd.DataFrame, arcs: pd.Data
                          states_per_observation: int = 12) -> pd.DataFrame:
     """Align each valid GPS fix to route order, never by row-index equality.
 
-    The dynamic program permits staying on or advancing along route positions,
-    never moving backward. Its emission is projected point-to-directed-segment
-    distance; transition cost compares route chainage advance to GPS geodesic
-    displacement, scaled by elapsed time. Route arcs that are disconnected are
-    recorded as a status warning when the selected path crosses them.
+    At each fix, choose among the nearest route segments that do not move
+    backward from the previous selected route position. The score combines
+    point-to-directed-segment distance and the difference between expected
+    route-chainage advance and GPS geodesic displacement. This is a forward
+    greedy sequence matcher, not an HMM or Viterbi decoder. Disconnected route
+    arcs and competing choices are exposed in per-observation status fields.
     """
     if track.empty or route.empty:
         return pd.DataFrame(columns=["observation_id", "aligned_route_arc_id", "aligned_route_position",
@@ -78,53 +79,42 @@ def align_track_to_route(track: pd.DataFrame, nodes: pd.DataFrame, arcs: pd.Data
     gx, gy = transformer.transform(lon, lat); gx, gy = np.asarray(gx), np.asarray(gy)
     dx, dy = x2-x1, y2-y1
     l2 = np.maximum(dx*dx + dy*dy, 1e-9)
-    state_positions, state_distances, state_ratios = [], [], []
-    for i in range(len(tr)):
-        ratio = np.clip(((gx[i]-x1)*dx + (gy[i]-y1)*dy) / l2, 0.0, 1.0)
+    ts = tr.timestamp.to_numpy(dtype=float)
+    n = len(tr)
+    chosen, selected_dist, selected_ratio = np.zeros(n, dtype=int), np.full(n, np.nan), np.full(n, np.nan)
+    candidate_states, candidate_distances, candidate_ratios, candidate_scores = [], [], [], []
+    route_order_violations = np.zeros(n, dtype=bool)
+    previous_state, previous_chain = None, None
+    for t in range(n):
+        ratio = np.clip(((gx[t]-x1)*dx + (gy[t]-y1)*dy) / l2, 0.0, 1.0)
         px, py = x1 + ratio*dx, y1 + ratio*dy
-        dist = np.hypot(gx[i]-px, gy[i]-py)
+        dist = np.hypot(gx[t]-px, gy[t]-py)
         k = min(states_per_observation, len(dist))
         ids = np.argpartition(dist, k-1)[:k] if k < len(dist) else np.arange(len(dist))
         ids = ids[np.argsort(dist[ids])]
-        state_positions.append(ids.astype(int)); state_distances.append(dist[ids]); state_ratios.append(ratio[ids])
-
-    ts = tr.timestamp.to_numpy(dtype=float)
-    lonlat = np.column_stack([lon, lat])
-    n = len(tr)
-    costs = [state_distances[0] / 20.0]
-    backpointers = [np.full(len(costs[0]), -1, dtype=int)]
-    for t in range(1, n):
-        _, _, displacement = GEOD.inv(lonlat[t-1, 0], lonlat[t-1, 1], lonlat[t, 0], lonlat[t, 1])
-        dt = ts[t] - ts[t-1]
-        scale = max(20.0, 5.0 * max(dt, 1.0))
-        prev_states, curr_states = state_positions[t-1], state_positions[t]
-        prev_cost = costs[-1]
-        current_cost = np.full(len(curr_states), np.inf)
-        back = np.full(len(curr_states), -1, dtype=int)
-        for ci, cur in enumerate(curr_states):
-            eligible = np.flatnonzero(prev_states <= cur)
-            if not len(eligible):
-                # Keep the path defined for GPS jitter/backtracking, but mark
-                # the resulting observation unconfident below.
-                eligible = np.arange(len(prev_states))
-            delta_m = cumulative[cur] - cumulative[prev_states[eligible]]
-            progress_cost = np.abs(delta_m - displacement) / scale
-            backward_penalty = np.where(prev_states[eligible] > cur, 25.0, 0.0)
-            broken_penalty = np.zeros(len(eligible))
-            for ix, prev in enumerate(prev_states[eligible]):
-                lo, hi = sorted((int(prev), int(cur)))
-                if hi > lo and broken[lo+1:hi+1].any(): broken_penalty[ix] = 2.0
-            totals = prev_cost[eligible] + progress_cost + backward_penalty + broken_penalty
-            best_local = int(np.argmin(totals))
-            current_cost[ci] = state_distances[t][ci] / 20.0 + totals[best_local]
-            back[ci] = eligible[best_local]
-        costs.append(current_cost); backpointers.append(back)
-    chosen_state = np.zeros(n, dtype=int)
-    chosen_state[-1] = int(np.argmin(costs[-1]))
-    for t in range(n-1, 0, -1): chosen_state[t-1] = backpointers[t][chosen_state[t]]
-    chosen = np.array([state_positions[t][chosen_state[t]] for t in range(n)], dtype=int)
-    selected_dist = np.array([state_distances[t][chosen_state[t]] for t in range(n)], dtype=float)
-    selected_ratio = np.array([state_ratios[t][chosen_state[t]] for t in range(n)], dtype=float)
+        if previous_state is None:
+            scores = dist[ids] / 20.0
+            allowed = np.arange(len(ids))
+        else:
+            allowed = np.flatnonzero(ids >= previous_state)
+            if not len(allowed):
+                allowed = np.arange(len(ids))
+                route_order_violations[t] = True
+            _, _, displacement = GEOD.inv(lon[t-1], lat[t-1], lon[t], lat[t])
+            dt = ts[t] - ts[t-1]
+            scale = max(20.0, 5.0 * max(dt, 1.0))
+            chainage = cumulative[ids] + ratio[ids]*lengths[ids]
+            delta = chainage - previous_chain
+            progress_cost = np.abs(delta - displacement) / scale
+            broken_cost = np.zeros(len(ids))
+            for j, cur in enumerate(ids):
+                if cur > previous_state and broken[previous_state+1:cur+1].any(): broken_cost[j] = 2.0
+            scores = dist[ids]/20.0 + progress_cost + broken_cost
+        local = allowed[int(np.argmin(scores[allowed]))]
+        chosen[t] = ids[local]; selected_dist[t] = dist[ids[local]]; selected_ratio[t] = ratio[ids[local]]
+        candidate_states.append(ids); candidate_distances.append(dist[ids]); candidate_ratios.append(ratio[ids]); candidate_scores.append(scores)
+        previous_state = chosen[t]
+        previous_chain = cumulative[chosen[t]] + selected_ratio[t]*lengths[chosen[t]]
     selected_aid = aids[chosen]
     selected_route_position = route_pos[chosen]
     chain = cumulative[chosen] + selected_ratio * lengths[chosen]
@@ -135,17 +125,17 @@ def align_track_to_route(track: pd.DataFrame, nodes: pd.DataFrame, arcs: pd.Data
         if not np.isfinite([lon[t], lat[t], ts[t]]).all(): statuses.append("invalid_timestamp_or_coordinate")
         if selected_dist[t] > max_distance_m: statuses.append("unalignable_spatial")
         if t and ts[t] - ts[t-1] > gps_gap_seconds: statuses.append("gps_gap")
-        if t and chosen[t] < chosen[t-1]: statuses.append("route_order_violation")
+        if route_order_violations[t]: statuses.append("route_order_violation")
         if t and chosen[t] > chosen[t-1]:
             lo, hi = chosen[t-1], chosen[t]
             if hi < len(broken) and broken[lo+1:hi+1].any(): statuses.append("route_discontinuity")
-        lower = selected_route_position[t-1] if t else 0
-        upper = selected_route_position[t+1] if t+1 < n else len(route)-1
         alternatives = []
-        for j, (state_ids, state_ds) in enumerate(zip(state_positions[t], state_distances[t])):
-            route_index = route_pos[state_ids]
-            if lower <= route_index <= upper and aids[state_ids] != selected_aid[t] and state_ds <= selected_dist[t] + ambiguity_margin_m:
-                alternatives.append(float(state_ds))
+        allowed_floor = chosen[t-1] if t else 0
+        for j, state_id in enumerate(candidate_states[t]):
+            if (state_id >= allowed_floor and aids[state_id] != selected_aid[t]
+                    and candidate_distances[t][j] <= selected_dist[t] + ambiguity_margin_m
+                    and candidate_scores[t][j] <= candidate_scores[t][int(np.where(candidate_states[t] == chosen[t])[0][0])] + 1.0):
+                alternatives.append(float(candidate_distances[t][j]))
         margin = min(alternatives) - selected_dist[t] if alternatives else np.inf
         if alternatives: statuses.append("ambiguous_reference")
         if not statuses: statuses = ["confident"]
@@ -153,6 +143,7 @@ def align_track_to_route(track: pd.DataFrame, nodes: pd.DataFrame, arcs: pd.Data
         status = "|".join(dict.fromkeys(statuses))
         output.append({
             "observation_id": tr.iloc[t].observation_id,
+            "alignment_method": "forward_monotone_v1",
             "timestamp": ts[t], "aligned_route_arc_id": int(selected_aid[t]),
             "aligned_route_position": int(selected_route_position[t]),
             "route_distance_m": float(selected_dist[t]),
@@ -181,7 +172,7 @@ def label_candidate_trip(candidates: pd.DataFrame, alignment: pd.DataFrame) -> t
     joined["label"] = pd.array(np.where(eligible, labels, None), dtype="Int8")
     obs_diag = alignment.copy()
     present = joined.groupby("observation_id").candidate_covered.first()
-    obs_diag["candidate_covered"] = obs_diag.observation_id.map(present).fillna(False)
+    obs_diag["candidate_covered"] = obs_diag.observation_id.map(present).fillna(False).astype(bool)
     obs_diag.loc[obs_diag.alignment_status.eq("confident") & ~obs_diag.candidate_covered, "alignment_status"] = "candidate_miss"
     return joined, obs_diag
 
@@ -198,31 +189,53 @@ def label_candidate_file(partition="train", radius=50, input_path: Path | None =
     if output_path.exists(): output_path.unlink()
     report_rows, obs_frames = [], []
     for trip_id, cand in _trip_groups(input_path):
-        raw = load_trip(partition, trip_id)
-        clean, _ = preprocess_track(raw["track"])
-        alignment = align_track_to_route(clean, raw["nodes"], raw["arcs"], raw["route"])
+        cache_path = LABEL_DIR / f"{partition}_{trip_id}_route_alignment_forward.csv"
+        if cache_path.exists():
+            alignment = pd.read_csv(cache_path)
+        else:
+            raw = load_trip(partition, trip_id)
+            clean, _ = preprocess_track(raw["track"])
+            alignment = align_track_to_route(clean, raw["nodes"], raw["arcs"], raw["route"])
+            alignment.to_csv(cache_path, index=False)
         labelled, obs_diag = label_candidate_trip(cand, alignment)
         obs_diag.insert(0, "trip_id", trip_id); obs_diag.insert(1, "partition", partition); obs_diag["radius_m"] = radius
         obs_frames.append(obs_diag)
         labelled.to_csv(output_path, mode="a", index=False, header=not output_path.exists())
         counts = obs_diag.alignment_status.value_counts()
+        coverage_eligible = obs_diag.alignment_status.isin(["confident", "candidate_miss"])
+        covered_count = int((coverage_eligible & obs_diag.candidate_covered).sum())
+        coverage_denominator = int(coverage_eligible.sum())
+        positive_observations = int(labelled.loc[labelled.label.eq(1), "observation_id"].nunique())
         report_rows.append({"trip_id": trip_id, "partition": partition, "radius_m": radius,
                             "gps_observations": len(alignment), "candidate_rows": len(cand),
                             "confident_observations": int(counts.get("confident", 0)),
                             "candidate_misses": int(counts.get("candidate_miss", 0)),
+                            "positive_observations": positive_observations,
+                            "candidate_covered_observations": covered_count,
+                            "coverage_eligible_observations": coverage_denominator,
+                            "labeled_candidate_rows": int(labelled.label.notna().sum()),
+                            "ambiguous_candidate_rows": int(labelled.label.isna().sum()),
                             "ambiguous_observations": int(obs_diag.alignment_status.str.contains("ambiguous|gps_gap|discontinuity|order_violation", regex=True).sum()),
                             "unalignable_observations": int(obs_diag.alignment_status.str.contains("unalignable|invalid", regex=True).sum()),
-                            "candidate_coverage_pct": float(100 * obs_diag.candidate_covered.mean()) if len(obs_diag) else np.nan})
+                            "candidate_coverage_pct": float(100 * covered_count / coverage_denominator) if coverage_denominator else np.nan})
     report = pd.DataFrame(report_rows)
     diag_path = REPORT_DIR / f"{partition}_alignment_diagnostics_r{radius}.csv"
     summary_path = REPORT_DIR / f"{partition}_label_summary_r{radius}.csv"
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     report.to_csv(diag_path, index=False)
-    report.groupby(["partition", "radius_m"], as_index=False).agg(
+    summary = report.groupby(["partition", "radius_m"], as_index=False).agg(
         trips=("trip_id", "nunique"), gps_observations=("gps_observations", "sum"),
         confident_observations=("confident_observations", "sum"), candidate_misses=("candidate_misses", "sum"),
+        positive_observations=("positive_observations", "sum"),
+        candidate_covered_observations=("candidate_covered_observations", "sum"),
+        coverage_eligible_observations=("coverage_eligible_observations", "sum"),
+        labeled_candidate_rows=("labeled_candidate_rows", "sum"),
+        ambiguous_candidate_rows=("ambiguous_candidate_rows", "sum"),
         ambiguous_observations=("ambiguous_observations", "sum"), unalignable_observations=("unalignable_observations", "sum")
-    ).to_csv(summary_path, index=False)
+    )
+    summary["candidate_coverage_pct"] = np.where(summary.coverage_eligible_observations > 0,
+        100 * summary.candidate_covered_observations / summary.coverage_eligible_observations, np.nan)
+    summary.to_csv(summary_path, index=False)
     return output_path, diag_path
 
 

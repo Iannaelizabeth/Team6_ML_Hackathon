@@ -1,0 +1,2 @@
+partition,radius_m,trips,gps_observations,confident_observations,candidate_misses,positive_observations,candidate_covered_observations,coverage_eligible_observations,labeled_candidate_rows,ambiguous_candidate_rows,ambiguous_observations,unalignable_observations,candidate_coverage_pct
+train,30,80,208417,146181,8152,146181,146181,154333,698612,240720,31180,23123,94.71791515748414

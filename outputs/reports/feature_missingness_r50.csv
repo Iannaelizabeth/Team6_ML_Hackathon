@@ -1,0 +1,12 @@
+feature,missing_rows,missing_pct
+perpendicular_distance,0,0.0
+projection_ratio,0,0.0
+road_length,0,0.0
+gps_heading,20,0.0016284178455054853
+road_heading,0,0.0
+heading_difference,20,0.0016284178455054853
+gps_speed,0,0.0
+time_difference,627,0.051050899456596965
+distance_to_previous,627,0.051050899456596965
+distance_to_next,639,0.05202795016390026
+connectivity_score,189,0.015388548640026836

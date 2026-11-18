@@ -1,0 +1,16 @@
+{
+  "radius_m": 50,
+  "selected_feature_set": "fold_ranked_top_8",
+  "ablation_best_feature_set": "all_features",
+  "retained_features": [
+    "heading_difference",
+    "perpendicular_distance",
+    "projection_ratio",
+    "road_length",
+    "road_heading",
+    "distance_to_previous",
+    "distance_to_next",
+    "gps_speed"
+  ],
+  "reason": "Top eight RF importance-ranked features were selected independently inside each training fold; retained features for the final full-training fit are the most frequently selected, then ranked by mean training-fold importance. The outer-fold scores use fold-specific selections."
+}

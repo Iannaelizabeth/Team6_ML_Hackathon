@@ -1,19 +1,28 @@
 # Python virtual environment
 .venv/
+venv/
 
 # Python cache
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Generated candidate datasets
 outputs/processed/
 outputs/maps/
 outputs/figures/
+outputs/models/
 
-# Candidate datasets and generated audit exports
+# Candidate datasets only; small reports remain eligible for Git
 data/candidates/
-data/reports/
+
+# Large PathSnap source data; already tracked files are unaffected by ignore rules
+*.track
+*.nodes
+*.arcs
+*.route
 
 # Notebook checkpoints
 .ipynb_checkpoints/
@@ -21,3 +30,12 @@ data/reports/
 # IDE files
 .vscode/
 .idea/
+
+# Operating-system temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.temp
+~$*
+*.log

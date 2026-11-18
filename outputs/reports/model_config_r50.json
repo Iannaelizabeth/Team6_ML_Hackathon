@@ -1,0 +1,36 @@
+{
+  "radius_m": 50,
+  "n_splits": 3,
+  "random_state": 42,
+  "features": [
+    "heading_difference",
+    "perpendicular_distance",
+    "projection_ratio",
+    "road_length",
+    "road_heading",
+    "distance_to_previous",
+    "distance_to_next",
+    "gps_speed"
+  ],
+  "selected_feature_set": "fold_ranked_top_8",
+  "random_forest": {
+    "n_estimators": 80,
+    "max_depth": 24,
+    "min_samples_leaf": 2,
+    "max_features": "sqrt",
+    "class_weight": "balanced_subsample",
+    "n_jobs": -1
+  },
+  "mlp": {
+    "hidden_layer_sizes": [
+      64,
+      32
+    ],
+    "alpha": 0.0001,
+    "batch_size": 512,
+    "max_iter": 20,
+    "early_stopping": false
+  },
+  "training_rows": 937213,
+  "training_trips": 80
+}
